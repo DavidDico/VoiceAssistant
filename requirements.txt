@@ -1,0 +1,10 @@
+pvporcupine==3.0.2
+pyaudio==0.2.14
+google-cloud-speech==2.26.0
+openai==1.54.0
+pygame==2.6.0
+pytz==2024.1
+requests==2.31.0
+numpy==1.26.4
+twilio==9.0.4
+feedparser==6.0.10
