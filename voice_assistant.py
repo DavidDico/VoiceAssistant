@@ -5,6 +5,7 @@ import os
 import queue
 import threading
 import time
+import random
 from google.cloud import speech
 from openai import OpenAI
 import wave
@@ -12,6 +13,20 @@ import tempfile
 import json
 import numpy as np
 from assistant_tools import AssistantTools, TOOL_FUNCTIONS
+
+# =============================================================================
+# EDITABLE GREETINGS - Modify this list to change wake word responses
+# =============================================================================
+WAKE_WORD_GREETINGS = [
+    "Oui ?",
+    "Je vous écoute",
+    "À votre service",
+    "Que puis-je faire pour vous ?",
+    "Je suis là",
+    "Dites-moi",
+    "Comment puis-je vous aider ?",
+]
+# =============================================================================
 
 # Extended tool functions with conversation control
 EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
@@ -53,7 +68,7 @@ EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
 
 
 class VoiceAssistant:
-    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None):
+    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None):
         """
         Initialize the voice assistant.
         
@@ -77,6 +92,7 @@ class VoiceAssistant:
             beep_volume: Volume level for beeps and notification sounds (0.0 to 1.0, default 0.3)
             google_calendar_credentials_path: Path to Google Calendar OAuth credentials JSON (optional)
             google_calendar_id: Google Calendar ID to use (optional, defaults to 'primary')
+            greetings_cache_dir: Directory to cache greeting audio files (optional, defaults to ~/.casimir_greetings)
         """
         self.porcupine_access_key = porcupine_access_key
         self.openai_client = OpenAI(api_key=openai_api_key)
@@ -107,6 +123,11 @@ class VoiceAssistant:
         # Wake word settings
         self.wake_word = wake_word
         self.custom_wake_word_path = custom_wake_word_path
+        
+        # Greetings cache settings
+        self.greetings_cache_dir = greetings_cache_dir or os.path.expanduser("~/.casimir_greetings")
+        self._greeting_files = {}  # Cache of greeting text -> file path
+        self._ensure_greetings_cached()
         
         # Set Google credentials if provided
         if google_credentials_path:
@@ -185,6 +206,51 @@ class VoiceAssistant:
         # Speech recognition settings
         self.silence_timeout = 1.5  # Seconds of silence before considering speech ended
         self.last_transcript_time = None
+    
+    def _get_greeting_filename(self, greeting_text):
+        """Generate a safe filename for a greeting text."""
+        import hashlib
+        # Use hash to create unique, safe filename
+        text_hash = hashlib.md5(greeting_text.encode('utf-8')).hexdigest()[:12]
+        # Also include voice name to regenerate if voice changes
+        return f"greeting_{self.tts_voice}_{text_hash}.mp3"
+    
+    def _ensure_greetings_cached(self):
+        """Ensure all greetings are cached as audio files."""
+        # Create cache directory if it doesn't exist
+        os.makedirs(self.greetings_cache_dir, exist_ok=True)
+        
+        print("🔊 Vérification du cache des salutations...")
+        
+        for greeting in WAKE_WORD_GREETINGS:
+            filename = self._get_greeting_filename(greeting)
+            filepath = os.path.join(self.greetings_cache_dir, filename)
+            
+            if os.path.exists(filepath):
+                # File already cached
+                self._greeting_files[greeting] = filepath
+                print(f"   ✓ Salutation en cache: \"{greeting}\"")
+            else:
+                # Need to generate TTS
+                print(f"   🎤 Génération TTS pour: \"{greeting}\"...")
+                try:
+                    response = self.openai_client.audio.speech.create(
+                        model="tts-1",
+                        voice=self.tts_voice,
+                        input=greeting
+                    )
+                    
+                    with open(filepath, 'wb') as f:
+                        f.write(response.content)
+                    
+                    self._greeting_files[greeting] = filepath
+                    print(f"   ✓ Salutation générée et mise en cache: \"{greeting}\"")
+                    
+                except Exception as e:
+                    print(f"   ❌ Erreur lors de la génération de \"{greeting}\": {e}")
+        
+        print(f"📁 Cache des salutations: {self.greetings_cache_dir}")
+        print(f"   {len(self._greeting_files)}/{len(WAKE_WORD_GREETINGS)} salutations prêtes\n")
         
     def initialize_porcupine(self):
         """Initialize Porcupine with a wake word."""
@@ -252,7 +318,7 @@ class VoiceAssistant:
                 
                 if keyword_index >= 0:
                     print("✓ Mot d'activation détecté!")
-                    self.play_acknowledgment_sound()
+                    self.play_acknowledgment_greeting()
                     stream.stop_stream()
                     stream.close()
                     self.listen_for_command()
@@ -301,57 +367,85 @@ class VoiceAssistant:
             self.listen_for_command()
         
         print("👋 Retour au mode mot d'activation\n")
+    
+    def play_acknowledgment_greeting(self):
+        """Play a random voice greeting to acknowledge wake word detection."""
+        with self._audio_lock:
+            self._is_speaking = True
+            try:
+                # Choose a random greeting
+                available_greetings = [g for g in WAKE_WORD_GREETINGS if g in self._greeting_files]
+                
+                if not available_greetings:
+                    # Fallback to beep if no greetings available
+                    print("⚠️ Aucune salutation disponible, utilisation du bip")
+                    self._play_fallback_beep()
+                    return
+                
+                greeting = random.choice(available_greetings)
+                filepath = self._greeting_files[greeting]
+                
+                print(f"🗣️ \"{greeting}\"")
+                
+                # Wake up wireless headset
+                self._play_headset_wakeup()
+                
+                # Play the cached greeting
+                self._play_audio_file(filepath)
+                
+            except Exception as e:
+                print(f"❌ Erreur lors de la lecture de la salutation: {e}")
+                self._play_fallback_beep()
+            finally:
+                self._is_speaking = False
+    
+    def _play_fallback_beep(self):
+        """Play a simple beep as fallback if voice greeting fails."""
+        try:
+            import pygame
+            
+            # Initialize pygame mixer
+            pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
+            
+            # Generate a pleasant beep sound (440 Hz for 200ms)
+            sample_rate = 22050
+            duration = 0.2  # seconds
+            frequency = 440  # Hz (A note)
+            
+            # Generate sine wave
+            samples = int(sample_rate * duration)
+            wave_data = np.sin(2 * np.pi * frequency * np.linspace(0, duration, samples))
+            
+            # Apply fade in/out to avoid clicks
+            fade_samples = int(sample_rate * 0.02)  # 20ms fade
+            wave_data[:fade_samples] *= np.linspace(0, 1, fade_samples)
+            wave_data[-fade_samples:] *= np.linspace(1, 0, fade_samples)
+            
+            # Apply volume
+            wave_data *= self.beep_volume
+            
+            # Convert to 16-bit integers
+            wave_data = (wave_data * 32767).astype(np.int16)
+            
+            # Create stereo sound (duplicate for both channels)
+            stereo_data = np.column_stack((wave_data, wave_data))
+            
+            # Play the sound
+            sound = pygame.sndarray.make_sound(stereo_data)
+            sound.play()
+            
+            # Wait for sound to finish
+            while pygame.mixer.get_busy():
+                pygame.time.wait(10)
+            
+            pygame.mixer.quit()
+            
+        except Exception as e:
+            print("🔔 Beep!")
             
     def play_acknowledgment_sound(self):
-        """Play a simple beep to acknowledge wake word detection."""
-        # Acquire lock to prevent simultaneous audio playback
-        with self._audio_lock:
-            try:
-                import pygame
-                import numpy as np
-                
-                # Initialize pygame mixer
-                pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
-                
-                # Generate a pleasant beep sound (440 Hz for 200ms)
-                sample_rate = 22050
-                duration = 0.2  # seconds
-                frequency = 440  # Hz (A note)
-                
-                # Generate sine wave
-                samples = int(sample_rate * duration)
-                wave_data = np.sin(2 * np.pi * frequency * np.linspace(0, duration, samples))
-                
-                # Apply fade in/out to avoid clicks
-                fade_samples = int(sample_rate * 0.02)  # 20ms fade
-                wave_data[:fade_samples] *= np.linspace(0, 1, fade_samples)
-                wave_data[-fade_samples:] *= np.linspace(1, 0, fade_samples)
-                
-                # Apply volume
-                wave_data *= self.beep_volume
-                
-                # Convert to 16-bit integers
-                wave_data = (wave_data * 32767).astype(np.int16)
-                
-                # Create stereo sound (duplicate for both channels)
-                stereo_data = np.column_stack((wave_data, wave_data))
-                
-                # Play the sound
-                sound = pygame.sndarray.make_sound(stereo_data)
-                sound.play()
-                
-                # Wait for sound to finish
-                while pygame.mixer.get_busy():
-                    pygame.time.wait(10)
-                
-                pygame.mixer.quit()
-                
-            except ImportError:
-                # Fallback to console beep if pygame/numpy not available
-                print("🔔 Beep!")
-            except Exception as e:
-                # Silent fallback if sound generation fails
-                print("🔔")
+        """Play a simple beep to acknowledge wake word detection. (Legacy - now calls greeting)"""
+        self.play_acknowledgment_greeting()
     
     def play_wake_word_mode_sound(self):
         """Play a descending tone to indicate return to wake word mode."""
@@ -967,6 +1061,12 @@ if __name__ == "__main__":
     except ImportError:
         GOOGLE_CALENDAR_ID = None  # Will default to 'primary'
     
+    # Optional: import greetings cache directory if defined in config
+    try:
+        from config import GREETINGS_CACHE_DIR
+    except ImportError:
+        GREETINGS_CACHE_DIR = None  # Will default to ~/.casimir_greetings
+    
     # Create and run the assistant
     assistant = VoiceAssistant(
         porcupine_access_key=PORCUPINE_ACCESS_KEY,
@@ -987,7 +1087,8 @@ if __name__ == "__main__":
         rss_feeds=RSS_FEEDS,
         beep_volume=BEEP_VOLUME,
         google_calendar_credentials_path=GOOGLE_CALENDAR_CREDENTIALS_PATH,
-        google_calendar_id=GOOGLE_CALENDAR_ID
+        google_calendar_id=GOOGLE_CALENDAR_ID,
+        greetings_cache_dir=GREETINGS_CACHE_DIR
     )
     
     assistant.run()
