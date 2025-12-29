@@ -844,15 +844,119 @@ class VoiceAssistant:
         except Exception as e:
             return {"success": False, "error": str(e)}
             
+    def _split_into_sentences(self, text: str) -> list:
+        """Split text into sentences based on punctuation and newlines."""
+        import re
+        
+        # Split on sentence-ending punctuation followed by space or end, or on newlines
+        # Keep the punctuation with the sentence
+        sentences = re.split(r'(?<=[.!?:])\s+|\n+', text)
+        
+        # Filter out empty strings and strip whitespace
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        return sentences
+    
+    def _generate_tts_audio(self, text: str) -> str:
+        """Generate TTS audio for text and return the temp file path."""
+        response = self.openai_client.audio.speech.create(
+            model="tts-1",
+            voice=self.tts_voice,
+            input=text
+        )
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_audio:
+            temp_audio.write(response.content)
+            return temp_audio.name
+    
     def speak(self, text):
-        """Convert text to speech using OpenAI TTS and play it."""
+        """Convert text to speech using OpenAI TTS with chunked streaming for faster response."""
         print("🔊 Prononciation de la réponse...")
+        
+        sentences = self._split_into_sentences(text)
+        
+        if not sentences:
+            return
+        
+        # If only one sentence or very short text, use simple approach
+        if len(sentences) == 1:
+            self._speak_simple(text)
+            return
+        
+        # Split into first sentence and the rest
+        first_sentence = sentences[0]
+        remaining_text = ' '.join(sentences[1:])
+        
+        print(f"   📝 Chunked TTS: {len(sentences)} parties")
         
         with self._audio_lock:
             self._is_speaking = True
             
             try:
-                # Wake up wireless headset with silent audio
+                # Wake up wireless headset
+                self._play_headset_wakeup()
+                
+                # Generate TTS for first sentence
+                print(f"   🎵 Génération partie 1: \"{first_sentence[:50]}{'...' if len(first_sentence) > 50 else ''}\"")
+                first_audio_path = self._generate_tts_audio(first_sentence)
+                
+                # Start generating the rest in background
+                remaining_audio_path = [None]  # Use list to allow modification in thread
+                generation_done = threading.Event()
+                generation_error = [None]
+                
+                def generate_remaining():
+                    try:
+                        print(f"   🎵 Génération partie 2 en arrière-plan...")
+                        remaining_audio_path[0] = self._generate_tts_audio(remaining_text)
+                    except Exception as e:
+                        generation_error[0] = e
+                    finally:
+                        generation_done.set()
+                
+                # Start background generation
+                bg_thread = threading.Thread(target=generate_remaining, daemon=True)
+                bg_thread.start()
+                
+                # Play first sentence
+                self._play_audio_file(first_audio_path)
+                
+                # Clean up first audio file
+                try:
+                    os.unlink(first_audio_path)
+                except:
+                    pass
+                
+                # Wait for background generation to complete
+                generation_done.wait()
+                
+                if generation_error[0]:
+                    print(f"   ❌ Erreur génération partie 2: {generation_error[0]}")
+                elif remaining_audio_path[0]:
+                    # Small pause between chunks for natural flow
+                    time.sleep(0.15)
+                    
+                    # Play remaining audio
+                    self._play_audio_file(remaining_audio_path[0])
+                    
+                    # Clean up
+                    try:
+                        os.unlink(remaining_audio_path[0])
+                    except:
+                        pass
+                
+            except Exception as e:
+                print(f"❌ Erreur lors de la génération/lecture de la parole: {e}")
+            finally:
+                self._is_speaking = False
+    
+    def _speak_simple(self, text):
+        """Simple TTS without chunking for short texts."""
+        with self._audio_lock:
+            self._is_speaking = True
+            
+            try:
+                # Wake up wireless headset
                 self._play_headset_wakeup()
                 
                 # Generate speech using OpenAI TTS
