@@ -146,6 +146,9 @@ class VoiceAssistant:
         Garde tes réponses concises et conversationnelles, car elles seront prononcées à voix haute. 
         Vise des réponses de moins de 3 phrases sauf si plus de détails sont spécifiquement demandés.
         
+        IMPORTANT: Ne mentionne JAMAIS d'URLs ou de liens dans tes réponses. Tout ce que tu dis sera lu à voix haute,
+        donc les URLs sont inutiles et gênantes. Résume simplement les informations sans proposer de liens.
+        
         INFORMATION IMPORTANTE: Nous sommes le {current_date} et il est {current_time}.
         Utilise cette information pour répondre aux questions sur "aujourd'hui", "hier", "demain", etc.
         
