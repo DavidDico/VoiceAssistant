@@ -154,8 +154,11 @@ class VoiceAssistant:
         MESSAGES SMS ET WHATSAPP:
         Quand l'utilisateur dit "envoie-moi un SMS", "envoie-moi un message", "envoie-moi un WhatsApp" ou utilise 
         "moi/me" comme destinataire:
-        - Pour WhatsApp: utilise "{first_whatsapp_contact}" comme nom de contact
-        - Pour SMS: utilise "{first_sms_contact}" comme nom de contact
+        1. Si l'utilisateur s'est identifié dans la conversation (ex: "Je suis David", "C'est Marie", "Moi c'est Pierre"),
+           utilise ce nom comme contact pour l'envoi.
+        2. Sinon, par défaut:
+           - Pour WhatsApp: utilise "{first_whatsapp_contact}" comme nom de contact
+           - Pour SMS: utilise "{first_sms_contact}" comme nom de contact
         
         GESTION DE LA CONVERSATION:
         Tu as une fonction end_conversation pour terminer la conversation.

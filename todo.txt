@@ -3,5 +3,5 @@
 [ ] Système de messagerie qui fonctionne comme un répondeur ("vous avez deux messages", etc).
 [x] Remplacer le bip par du tts ("oui ?", "j'écoute", "à votre service").
 [x] Et si toutes les interactions déclenchaient le mode conversation ? On serait obligé de dire explcitement "ok merci" ou "merci Casimir", ce genre de trucs pour qu'il termine l'interaction.
-[ ] Affiner le prompt en précisant que quand on dit "moi", ça se réfère par défaut à la 1ère personne de la liste SAUF si la personne a donné son nom au cours de la conversation en cours, ou récemment.
+[x] Affiner le prompt en précisant que quand on dit "moi", ça se réfère par défaut à la 1ère personne de la liste SAUF si la personne a donné son nom au cours de la conversation en cours, ou récemment.
 [ ] Réponse plus rapide : appeler le tts en deux fois.
