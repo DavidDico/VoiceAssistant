@@ -33,33 +33,11 @@ EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
     {
         "type": "function",
         "function": {
-            "name": "end_conversation_mode",
-            "description": "Terminer le mode conversation et retourner au mode d'écoute du mot d'activation. Utiliser cette fonction quand: 1) L'utilisateur dit explicitement qu'il veut terminer la conversation (ex: 'c'est tout', 'merci', 'au revoir', 'fin de conversation'). 2) L'interaction est naturellement terminée après une réponse de l'utilisateur à une question (ex: après qu'il ait dit 'non' à 'voulez-vous autre chose?'). 3) L'utilisateur a clairement fini sa demande et n'a pas besoin de plus d'information.",
+            "name": "end_conversation",
+            "description": "Terminer la conversation. Appeler cette fonction quand l'utilisateur a fini: après 'merci', 'ok', 'parfait', 'super', 'd'accord', 'au revoir', 'c'est tout', 'non merci', ou tout autre signal de fin.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Raison de la fin de conversation (pour debug)"
-                    }
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "start_conversation_mode",
-            "description": "Démarrer le mode conversation où l'assistant écoute continuellement sans nécessiter le mot d'activation. Utiliser quand l'utilisateur demande explicitement une conversation (ex: 'parlons', 'discutons', 'j'aimerais discuter', 'mode conversation').",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Raison du démarrage de la conversation (pour debug)"
-                    }
-                },
+                "properties": {},
                 "required": []
             }
         }
@@ -146,9 +124,9 @@ class VoiceAssistant:
         self._is_speaking = False  # Track if assistant is currently speaking
         self._audio_lock = threading.Lock()  # Lock to prevent simultaneous audio playback
         
-        # Conversation mode state
-        self.conversation_mode = False
-        self._conversation_should_end = False  # Flag set by GPT to end conversation
+        # Conversation state
+        self._conversation_active = False
+        self._conversation_should_end = False
         
         # System prompt for GPT
         import datetime
@@ -179,26 +157,20 @@ class VoiceAssistant:
         - Pour WhatsApp: utilise "{first_whatsapp_contact}" comme nom de contact
         - Pour SMS: utilise "{first_sms_contact}" comme nom de contact
         
-        MODE CONVERSATION:
-        Le système active AUTOMATIQUEMENT le mode conversation quand ta réponse se termine par un point d'interrogation (?).
-        Tu n'as donc PAS besoin d'appeler start_conversation_mode quand tu poses une question.
+        GESTION DE LA CONVERSATION:
+        Tu as une fonction end_conversation pour terminer la conversation.
         
-        Tu as accès à deux fonctions pour gérer le mode conversation:
+        APPELLE end_conversation quand l'utilisateur dit:
+        - "merci", "ok merci", "merci beaucoup"
+        - "ok", "d'accord", "très bien", "parfait", "super", "cool", "bien", "génial"
+        - "au revoir", "à plus", "salut", "bye", "ciao", "bonne journée"
+        - "c'est tout", "c'est bon", "ça marche", "j'ai compris", "noté"
+        - "non", "non merci", "ça ira", "pas besoin"
+        - "ah ok", "je vois", "entendu", "compris"
         
-        1. start_conversation_mode: Utilise-la UNIQUEMENT quand:
-           - L'utilisateur demande explicitement une conversation (ex: "parlons", "discutons", "mode conversation")
-           (Pas besoin de l'appeler quand tu poses une question - c'est automatique)
+        NE PAS appeler end_conversation si l'utilisateur pose une question ou fait une demande.
         
-        2. end_conversation_mode: Utilise-la quand:
-           - L'utilisateur dit vouloir terminer (ex: "c'est tout", "merci", "non", "au revoir", "fin", "stop")
-           - L'utilisateur répond à ta question et l'interaction est terminée (ex: il dit "non" ou "non merci")
-           - Tu n'as plus de question à poser
-           
-        IMPORTANT: Après que l'utilisateur réponde à ta question, si tu n'as plus rien à demander, 
-        tu DOIS appeler end_conversation_mode pour revenir au mode normal.
-        
-        Si l'utilisateur mentionne ton nom ("{wake_word_name}") pendant la conversation, c'est normal - 
-        il peut t'appeler par ton nom même en mode conversation."""
+        Si l'utilisateur mentionne ton nom ("{wake_word_name}") pendant la conversation, c'est normal."""
         
         # Conversation history (optional - keeps context)
         self.conversation_history = []
@@ -256,8 +228,6 @@ class VoiceAssistant:
         """Initialize Porcupine with a wake word."""
         if self.custom_wake_word_path:
             # Use custom wake word file
-            # For French wake words, we need to specify the French model
-            import os
             import pvporcupine
             
             # Get the Porcupine package directory
@@ -277,7 +247,6 @@ class VoiceAssistant:
             else:
                 print(f"⚠️ Modèle français non trouvé à: {french_model_path}")
                 print(f"Tentative sans spécifier le modèle...")
-                # Try without model_path and let Porcupine auto-detect
                 self.porcupine = pvporcupine.create(
                     access_key=self.porcupine_access_key,
                     keyword_paths=[self.custom_wake_word_path]
@@ -308,7 +277,7 @@ class VoiceAssistant:
             )
             
             print(f"\n🎤 Écoute du mot d'activation '{self.wake_word}'...")
-            print(f"(Dites '{self.wake_word}' pour activer)\n")
+            print(f"(Dites '{self.wake_word}' pour démarrer une conversation)\n")
             
             while True:
                 pcm = stream.read(self.porcupine.frame_length, exception_on_overflow=False)
@@ -318,14 +287,11 @@ class VoiceAssistant:
                 
                 if keyword_index >= 0:
                     print("✓ Mot d'activation détecté!")
-                    self.play_acknowledgment_greeting()
                     stream.stop_stream()
                     stream.close()
-                    self.listen_for_command()
                     
-                    # Check if we entered conversation mode
-                    if self.conversation_mode:
-                        self._run_conversation_loop()
+                    # Start a conversation
+                    self._run_conversation()
                     
                     # Restart stream for next wake word
                     stream = audio.open(
@@ -335,8 +301,6 @@ class VoiceAssistant:
                         input=True,
                         frames_per_buffer=self.porcupine.frame_length
                     )
-                    # Play wake word mode sound to indicate we're back to requiring wake word
-                    self.play_wake_word_mode_sound()
                     print(f"\n🎤 Écoute du mot d'activation '{self.wake_word}'...\n")
                     
         except KeyboardInterrupt:
@@ -346,27 +310,35 @@ class VoiceAssistant:
             stream.close()
             audio.terminate()
     
-    def _run_conversation_loop(self):
-        """Run the conversation mode loop until it ends."""
-        print("\n💬 Mode conversation activé - Je vous écoute sans mot d'activation")
-        print("   (Dites 'stop', 'fin', ou 'au revoir' pour terminer)\n")
+    def _run_conversation(self):
+        """Run a conversation until it naturally ends."""
+        # Reset conversation state
+        self._conversation_active = True
+        self._conversation_should_end = False
+        self.conversation_history = []  # Fresh conversation
         
-        while self.conversation_mode:
-            # Check if GPT signaled end of conversation
-            if self._conversation_should_end:
-                print("\n✓ Conversation terminée par l'assistant")
-                self.conversation_mode = False
-                self._conversation_should_end = False
-                break
-            
-            # Play a soft beep to indicate we're listening
+        # Greet the user
+        self.play_acknowledgment_greeting()
+        
+        print("\n💬 Conversation démarrée")
+        print("   (Dites 'merci', 'au revoir', etc. pour terminer)\n")
+        
+        # First turn - listen for initial command
+        self.listen_for_command()
+        
+        # Continue conversation until it should end
+        while self._conversation_active and not self._conversation_should_end:
+            # Play a soft beep to indicate we're still listening
             self.play_listening_beep()
             
-            # Listen for next command
+            # Listen for next input
             print("🎙️ Je vous écoute...")
             self.listen_for_command()
         
-        print("👋 Retour au mode mot d'activation\n")
+        # Conversation ended
+        self.play_end_conversation_sound()
+        print("👋 Conversation terminée - Retour au mode mot d'activation\n")
+        self._conversation_active = False
     
     def play_acknowledgment_greeting(self):
         """Play a random voice greeting to acknowledge wake word detection."""
@@ -442,17 +414,12 @@ class VoiceAssistant:
             
         except Exception as e:
             print("🔔 Beep!")
-            
-    def play_acknowledgment_sound(self):
-        """Play a simple beep to acknowledge wake word detection. (Legacy - now calls greeting)"""
-        self.play_acknowledgment_greeting()
     
-    def play_wake_word_mode_sound(self):
-        """Play a descending tone to indicate return to wake word mode."""
+    def play_end_conversation_sound(self):
+        """Play a descending tone to indicate conversation has ended."""
         with self._audio_lock:
             try:
                 import pygame
-                import numpy as np
                 
                 # Initialize pygame mixer
                 pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
@@ -502,67 +469,11 @@ class VoiceAssistant:
             except Exception as e:
                 print("🔔⬇️")
     
-    def play_conversation_mode_sound(self):
-        """Play an ascending tone to indicate conversation mode is active."""
-        with self._audio_lock:
-            try:
-                import pygame
-                import numpy as np
-                
-                # Initialize pygame mixer
-                pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
-                
-                sample_rate = 22050
-                
-                # Generate two ascending notes (E5 -> A5)
-                frequencies = [659, 880]  # E5 to A5
-                duration_per_note = 0.15  # seconds
-                
-                all_notes = []
-                for freq in frequencies:
-                    samples = int(sample_rate * duration_per_note)
-                    wave_data = np.sin(2 * np.pi * freq * np.linspace(0, duration_per_note, samples))
-                    
-                    # Apply fade in/out
-                    fade_samples = int(sample_rate * 0.01)  # 10ms fade
-                    wave_data[:fade_samples] *= np.linspace(0, 1, fade_samples)
-                    wave_data[-fade_samples:] *= np.linspace(1, 0, fade_samples)
-                    
-                    all_notes.append(wave_data)
-                
-                # Combine notes
-                combined = np.concatenate(all_notes)
-                
-                # Apply volume
-                combined *= self.beep_volume
-                
-                # Convert to 16-bit integers
-                combined = (combined * 32767).astype(np.int16)
-                
-                # Create stereo sound
-                stereo_data = np.column_stack((combined, combined))
-                
-                # Play the sound
-                sound = pygame.sndarray.make_sound(stereo_data)
-                sound.play()
-                
-                # Wait for sound to finish
-                while pygame.mixer.get_busy():
-                    pygame.time.wait(10)
-                
-                pygame.mixer.quit()
-                
-            except ImportError:
-                print("🔔⬆️")
-            except Exception as e:
-                print("🔔⬆️")
-    
     def play_listening_beep(self):
-        """Play a soft, short beep to indicate the assistant is listening for a response."""
+        """Play a soft, short beep to indicate the assistant is listening."""
         with self._audio_lock:
             try:
                 import pygame
-                import numpy as np
                 
                 # Initialize pygame mixer
                 pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
@@ -603,7 +514,7 @@ class VoiceAssistant:
         
     def listen_for_command(self):
         """Listen for user command using Google Speech-to-Text streaming."""
-        print("🎙️  En écoute de votre commande... (parlez maintenant)")
+        print("🎙️  En écoute... (parlez maintenant)")
         
         audio = pyaudio.PyAudio()
         stream = audio.open(
@@ -634,8 +545,6 @@ class VoiceAssistant:
         streaming_config = speech.StreamingRecognitionConfig(
             config=config,
             interim_results=True,
-            # single_utterance removed - will listen longer
-            # You can add a manual timeout instead
         )
         
         # Create streaming request generator
@@ -655,10 +564,12 @@ class VoiceAssistant:
                 print(f"📝 Vous avez dit: {transcript}")
                 self.process_command(transcript)
             else:
-                print("❌ Aucun discours détecté. Retour à l'écoute du mot d'activation.")
+                print("❌ Aucun discours détecté.")
+                self._conversation_should_end = True
                 
         except Exception as e:
             print(f"❌ Erreur lors de la reconnaissance vocale: {e}")
+            self._conversation_should_end = True
         finally:
             self.listening_for_command = False
             audio_thread.join()
@@ -696,20 +607,19 @@ class VoiceAssistant:
         transcript = ""
         last_interim_transcript = ""
         last_final_transcript = ""
-        last_activity_time = [time.time()]  # Use list to allow modification in nested function
+        last_activity_time = [time.time()]
         should_stop = [False]
-        got_any_speech = [False]  # Track if we've received any speech at all
+        got_any_speech = [False]
         
         def timeout_checker():
             """Check for timeout in a separate thread."""
             while not should_stop[0]:
-                # Stop if we got speech and then silence for too long
                 if got_any_speech[0] and time.time() - last_activity_time[0] > self.silence_timeout:
                     print(f"\n   [Silence détectée - fin de commande]")
                     self.listening_for_command = False
                     should_stop[0] = True
                     break
-                time.sleep(0.1)  # Check every 100ms
+                time.sleep(0.1)
         
         # Start timeout checker thread
         timeout_thread = threading.Thread(target=timeout_checker, daemon=True)
@@ -728,18 +638,13 @@ class VoiceAssistant:
                 if not result.alternatives:
                     continue
                 
-                # Mark that we got some speech
                 got_any_speech[0] = True
-                    
-                # Update activity time whenever we get any result
                 last_activity_time[0] = time.time()
                     
-                # Show interim results
                 if not result.is_final:
                     last_interim_transcript = result.alternatives[0].transcript
                     print(f"   (provisoire: {last_interim_transcript})", end='\r')
                 else:
-                    # Got a final result
                     last_final_transcript = result.alternatives[0].transcript
                     transcript = last_final_transcript
                     print(f"\n   [Confirmé: {transcript}]")
@@ -748,7 +653,6 @@ class VoiceAssistant:
             should_stop[0] = True
             timeout_thread.join(timeout=0.5)
         
-        # If we have a final transcript, use it. Otherwise use the last interim result
         if transcript:
             return transcript.strip()
         elif last_interim_transcript:
@@ -760,6 +664,23 @@ class VoiceAssistant:
     def process_command(self, command):
         """Send command to OpenAI GPT with function calling support and speak the response."""
         print("🤖 Traitement avec GPT...")
+        
+        # Check for end phrases locally as a fallback
+        end_phrases = [
+            "merci", "ok merci", "merci beaucoup", "thanks",
+            "au revoir", "à plus", "salut", "bye", "ciao", "bonne journée", "à bientôt",
+            "c'est tout", "c'est bon", "ça marche", "j'ai compris", "noté",
+            "non merci", "ça ira", "pas besoin", "c'est pas grave",
+            "parfait", "super", "génial", "cool", "nickel", "top",
+            "d'accord", "ok d'accord", "très bien", "entendu",
+        ]
+        command_lower = command.lower().strip()
+        
+        # Check if the command is just an end phrase (short response)
+        is_likely_end = any(command_lower == phrase or command_lower == phrase + "." for phrase in end_phrases)
+        # Also check for short responses starting with these phrases
+        if not is_likely_end and len(command_lower.split()) <= 3:
+            is_likely_end = any(command_lower.startswith(phrase) for phrase in end_phrases)
         
         try:
             # Add user message to conversation history
@@ -773,14 +694,13 @@ class VoiceAssistant:
                 self.conversation_history = self.conversation_history[-10:]
             
             # Loop until GPT gives a final response without tool calls
-            max_iterations = 5  # Safety limit to prevent infinite loops
+            max_iterations = 5
             iteration = 0
             assistant_message = None
             
             while iteration < max_iterations:
                 iteration += 1
                 
-                # Call OpenAI API with function calling (including conversation control functions)
                 messages = [{"role": "system", "content": self.system_prompt}] + self.conversation_history
                 
                 response = self.openai_client.chat.completions.create(
@@ -800,7 +720,6 @@ class VoiceAssistant:
                     break
                 
                 # Process all tool calls from this response
-                # First, add the assistant message with all tool calls
                 tool_calls_for_history = []
                 for tool_call in response_message.tool_calls:
                     tool_calls_for_history.append({
@@ -825,17 +744,11 @@ class VoiceAssistant:
                     
                     print(f"🔧 Appel de fonction: {function_name}({function_args})")
                     
-                    # Handle conversation control functions
-                    if function_name == "end_conversation_mode":
-                        print(f"   → Fin du mode conversation: {function_args.get('reason', 'non spécifié')}")
+                    # Handle end_conversation function
+                    if function_name == "end_conversation":
+                        print(f"   → Fin de conversation demandée")
                         self._conversation_should_end = True
-                        function_result = {"success": True, "message": "Mode conversation terminé"}
-                    elif function_name == "start_conversation_mode":
-                        print(f"   → Démarrage mode conversation: {function_args.get('reason', 'non spécifié')}")
-                        self.conversation_mode = True
-                        self._conversation_should_end = False
-                        self.play_conversation_mode_sound()
-                        function_result = {"success": True, "message": "Mode conversation activé"}
+                        function_result = {"success": True, "message": "Conversation terminée"}
                     else:
                         # Execute other tool functions
                         function_result = self._execute_tool(function_name, function_args)
@@ -846,8 +759,6 @@ class VoiceAssistant:
                         "content": json.dumps(function_result, ensure_ascii=False),
                         "tool_call_id": tool_call.id
                     })
-                
-                # Continue loop to get next response (which may have more tool calls or final message)
             
             # Add assistant response to history
             if assistant_message:
@@ -858,15 +769,13 @@ class VoiceAssistant:
                 
                 print(f"💬 Assistant: {assistant_message}")
                 
-                # Force conversation mode if response ends with a question mark
-                if assistant_message.strip().endswith('?') and not self.conversation_mode:
-                    print("   📝 Question détectée - Activation du mode conversation")
-                    self.conversation_mode = True
-                    self._conversation_should_end = False
-                    self.play_conversation_mode_sound()
-                
                 # Speak the response
                 self.speak(assistant_message)
+                
+                # Fallback: if user said an end phrase and GPT didn't call end_conversation, end anyway
+                if is_likely_end and not self._conversation_should_end:
+                    print("   → Fin de conversation détectée localement")
+                    self._conversation_should_end = True
             
         except Exception as e:
             print(f"❌ Erreur lors du traitement de la commande: {e}")
@@ -905,9 +814,8 @@ class VoiceAssistant:
         """Convert text to speech using OpenAI TTS and play it."""
         print("🔊 Prononciation de la réponse...")
         
-        # Acquire lock to prevent simultaneous audio playback
         with self._audio_lock:
-            self._is_speaking = True  # Mark that we're speaking
+            self._is_speaking = True
             
             try:
                 # Wake up wireless headset with silent audio
@@ -915,7 +823,7 @@ class VoiceAssistant:
                 
                 # Generate speech using OpenAI TTS
                 response = self.openai_client.audio.speech.create(
-                    model="tts-1",  # or "tts-1-hd" for higher quality
+                    model="tts-1",
                     voice=self.tts_voice,
                     input=text
                 )
@@ -928,56 +836,44 @@ class VoiceAssistant:
                 # Play the audio file
                 self._play_audio_file(temp_audio_path)
                 
-                # Clean up - wait a bit to ensure pygame has released the file
-                import time
+                # Clean up
                 time.sleep(0.5)
                 try:
                     os.unlink(temp_audio_path)
                 except:
-                    pass  # Ignore errors if file is still in use
+                    pass
                 
             except Exception as e:
                 print(f"❌ Erreur lors de la génération/lecture de la parole: {e}")
             finally:
-                self._is_speaking = False  # Mark that we're done speaking
+                self._is_speaking = False
             
     def _play_headset_wakeup(self):
         """Play a very brief, nearly silent tone to wake up wireless headsets."""
         try:
             import pygame
             
-            # Initialize mixer if not already done
             pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
             
-            # Generate a very short, very quiet tone (50ms at low volume)
             sample_rate = 22050
-            duration = 0.05  # 50 milliseconds
+            duration = 0.05
             frequency = 440
             
             samples = int(sample_rate * duration)
             wave_data = np.sin(2 * np.pi * frequency * np.linspace(0, duration, samples))
-            
-            # Make it very quiet (1% volume)
             wave_data = wave_data * 0.01
-            
-            # Convert to 16-bit integers
             wave_data = (wave_data * 32767).astype(np.int16)
-            
-            # Create stereo sound
             stereo_data = np.column_stack((wave_data, wave_data))
             
-            # Play the sound
             sound = pygame.sndarray.make_sound(stereo_data)
             sound.play()
             
-            # Wait for it to finish
             while pygame.mixer.get_busy():
                 pygame.time.wait(10)
             
             pygame.mixer.quit()
             
         except Exception:
-            # Silently fail - not critical
             pass
     
     def _play_audio_file(self, file_path):
@@ -988,11 +884,9 @@ class VoiceAssistant:
             pygame.mixer.music.load(file_path)
             pygame.mixer.music.play()
             
-            # Wait for playback to finish
             while pygame.mixer.music.get_busy():
                 pygame.time.Clock().tick(10)
             
-            # Properly cleanup pygame mixer
             pygame.mixer.music.unload()
             pygame.mixer.quit()
                 
@@ -1007,10 +901,10 @@ class VoiceAssistant:
         print("=" * 60)
         print("🎙️  Assistant Vocal Démarrage...")
         print("=" * 60)
-        print("\n📋 Fonctionnalités du mode conversation:")
-        print("   • Dites 'parlons' ou 'mode conversation' pour activer")
-        print("   • Dites 'stop', 'fin', ou 'au revoir' pour terminer")
-        print("   • L'assistant terminera la conversation quand l'échange est fini\n")
+        print("\n📋 Mode de fonctionnement:")
+        print(f"   • Dites '{self.wake_word}' pour démarrer une conversation")
+        print("   • La conversation continue jusqu'à sa fin naturelle")
+        print("   • Dites 'merci', 'au revoir', etc. pour terminer\n")
         
         try:
             self.initialize_porcupine()
@@ -1044,13 +938,12 @@ if __name__ == "__main__":
         RSS_FEEDS
     )
     
-    # Optional: import BEEP_VOLUME if defined in config, otherwise use default
+    # Optional imports
     try:
         from config import BEEP_VOLUME
     except ImportError:
-        BEEP_VOLUME = 0.3  # Default value
+        BEEP_VOLUME = 0.3
     
-    # Optional: import Google Calendar settings if defined in config
     try:
         from config import GOOGLE_CALENDAR_CREDENTIALS_PATH
     except ImportError:
@@ -1059,13 +952,12 @@ if __name__ == "__main__":
     try:
         from config import GOOGLE_CALENDAR_ID
     except ImportError:
-        GOOGLE_CALENDAR_ID = None  # Will default to 'primary'
+        GOOGLE_CALENDAR_ID = None
     
-    # Optional: import greetings cache directory if defined in config
     try:
         from config import GREETINGS_CACHE_DIR
     except ImportError:
-        GREETINGS_CACHE_DIR = None  # Will default to ~/.casimir_greetings
+        GREETINGS_CACHE_DIR = None
     
     # Create and run the assistant
     assistant = VoiceAssistant(

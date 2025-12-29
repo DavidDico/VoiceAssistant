@@ -762,7 +762,7 @@ class AssistantTools:
             category: Category of news (général, france, monde, sport, tech, économie)
             
         Returns:
-            Dictionary with news articles
+            Dictionary with news articles (titles only for brevity)
         """
         print(f"[DEBUG News] Récupération des actualités - category={category}")
         
@@ -801,13 +801,11 @@ class AssistantTools:
             
             print(f"[DEBUG News] Nombre d'entrées: {len(feed.entries)}")
             
+            # Only take first 3 articles for brevity (was 5)
             articles = []
-            for entry in feed.entries[:5]:  # Only take first 5
+            for entry in feed.entries[:3]:
                 articles.append({
                     "title": entry.get("title", ""),
-                    "description": entry.get("summary", entry.get("description", "")),
-                    "link": entry.get("link", ""),
-                    "published": entry.get("published", "")
                 })
             
             print(f"[DEBUG News] Articles récupérés: {len(articles)}")
@@ -818,7 +816,8 @@ class AssistantTools:
                 "success": True,
                 "category": category,
                 "articles": articles,
-                "total_results": len(articles)
+                "total_results": len(articles),
+                "instruction": "Présente ces titres de façon concise, en une phrase par titre maximum."
             }
             
         except ImportError:
@@ -982,7 +981,7 @@ TOOL_FUNCTIONS = [
         "type": "function",
         "function": {
             "name": "get_news",
-            "description": "Obtenir les 5 dernières actualités françaises depuis les flux RSS. Choisir une catégorie parmi: général, france, monde, sport, tech, économie.",
+            "description": "Obtenir les 3 derniers titres d'actualités françaises. Présenter de façon très concise.",
             "parameters": {
                 "type": "object",
                 "properties": {
