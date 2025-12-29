@@ -46,7 +46,7 @@ EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
 
 
 class VoiceAssistant:
-    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None):
+    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600):
         """
         Initialize the voice assistant.
         
@@ -71,6 +71,8 @@ class VoiceAssistant:
             google_calendar_credentials_path: Path to Google Calendar OAuth credentials JSON (optional)
             google_calendar_id: Google Calendar ID to use (optional, defaults to 'primary')
             greetings_cache_dir: Directory to cache greeting audio files (optional, defaults to ~/.casimir_greetings)
+            max_history_items: Maximum number of history items to keep (default 50)
+            history_max_age_seconds: Maximum age of history items in seconds (default 3600 = 1 hour)
         """
         self.porcupine_access_key = porcupine_access_key
         self.openai_client = OpenAI(api_key=openai_api_key)
@@ -128,6 +130,13 @@ class VoiceAssistant:
         self._conversation_active = False
         self._conversation_should_end = False
         
+        # History configuration
+        self.max_history_items = max_history_items
+        self.history_max_age_seconds = history_max_age_seconds
+        
+        # Conversation history with timestamps: list of {"message": {...}, "timestamp": float}
+        self.conversation_history = []
+        
         # System prompt for GPT
         import datetime
         now = datetime.datetime.now()
@@ -174,9 +183,6 @@ class VoiceAssistant:
         NE PAS appeler end_conversation si l'utilisateur pose une question ou fait une demande.
         
         Si l'utilisateur mentionne ton nom ("{wake_word_name}") pendant la conversation, c'est normal."""
-        
-        # Conversation history (optional - keeps context)
-        self.conversation_history = []
         
         # Speech recognition settings
         self.silence_timeout = 1.5  # Seconds of silence before considering speech ended
@@ -313,12 +319,41 @@ class VoiceAssistant:
             stream.close()
             audio.terminate()
     
+    def _clean_old_history(self):
+        """Remove old history items based on age and count limits. Only called between conversations."""
+        current_time = time.time()
+        
+        # Remove items older than max age
+        self.conversation_history = [
+            item for item in self.conversation_history
+            if current_time - item["timestamp"] <= self.history_max_age_seconds
+        ]
+        
+        # If still over max items, keep only the most recent ones
+        if len(self.conversation_history) > self.max_history_items:
+            self.conversation_history = self.conversation_history[-self.max_history_items:]
+        
+        print(f"   📜 Historique: {len(self.conversation_history)} messages conservés")
+    
+    def _add_to_history(self, message: dict):
+        """Add a message to conversation history with timestamp."""
+        self.conversation_history.append({
+            "message": message,
+            "timestamp": time.time()
+        })
+    
+    def _get_messages_for_api(self) -> list:
+        """Get messages formatted for the OpenAI API (without timestamps)."""
+        return [item["message"] for item in self.conversation_history]
+    
     def _run_conversation(self):
         """Run a conversation until it naturally ends."""
+        # Clean old history items before starting new conversation (not during)
+        self._clean_old_history()
+        
         # Reset conversation state
         self._conversation_active = True
         self._conversation_should_end = False
-        self.conversation_history = []  # Fresh conversation
         
         # Greet the user
         self.play_acknowledgment_greeting()
@@ -687,14 +722,10 @@ class VoiceAssistant:
         
         try:
             # Add user message to conversation history
-            self.conversation_history.append({
+            self._add_to_history({
                 "role": "user",
                 "content": command
             })
-            
-            # Keep only last 10 messages to avoid token limits
-            if len(self.conversation_history) > 10:
-                self.conversation_history = self.conversation_history[-10:]
             
             # Loop until GPT gives a final response without tool calls
             max_iterations = 5
@@ -704,7 +735,7 @@ class VoiceAssistant:
             while iteration < max_iterations:
                 iteration += 1
                 
-                messages = [{"role": "system", "content": self.system_prompt}] + self.conversation_history
+                messages = [{"role": "system", "content": self.system_prompt}] + self._get_messages_for_api()
                 
                 response = self.openai_client.chat.completions.create(
                     model="gpt-4o-mini",
@@ -734,7 +765,7 @@ class VoiceAssistant:
                         }
                     })
                 
-                self.conversation_history.append({
+                self._add_to_history({
                     "role": "assistant",
                     "content": None,
                     "tool_calls": tool_calls_for_history
@@ -757,7 +788,7 @@ class VoiceAssistant:
                         function_result = self._execute_tool(function_name, function_args)
                     
                     # Add tool result to conversation
-                    self.conversation_history.append({
+                    self._add_to_history({
                         "role": "tool",
                         "content": json.dumps(function_result, ensure_ascii=False),
                         "tool_call_id": tool_call.id
@@ -765,7 +796,7 @@ class VoiceAssistant:
             
             # Add assistant response to history
             if assistant_message:
-                self.conversation_history.append({
+                self._add_to_history({
                     "role": "assistant",
                     "content": assistant_message
                 })
@@ -962,6 +993,17 @@ if __name__ == "__main__":
     except ImportError:
         GREETINGS_CACHE_DIR = None
     
+    # Optional: history configuration
+    try:
+        from config import MAX_HISTORY_ITEMS
+    except ImportError:
+        MAX_HISTORY_ITEMS = 50  # Default: keep up to 50 messages
+    
+    try:
+        from config import HISTORY_MAX_AGE_SECONDS
+    except ImportError:
+        HISTORY_MAX_AGE_SECONDS = 3600  # Default: 1 hour
+    
     # Create and run the assistant
     assistant = VoiceAssistant(
         porcupine_access_key=PORCUPINE_ACCESS_KEY,
@@ -983,7 +1025,9 @@ if __name__ == "__main__":
         beep_volume=BEEP_VOLUME,
         google_calendar_credentials_path=GOOGLE_CALENDAR_CREDENTIALS_PATH,
         google_calendar_id=GOOGLE_CALENDAR_ID,
-        greetings_cache_dir=GREETINGS_CACHE_DIR
+        greetings_cache_dir=GREETINGS_CACHE_DIR,
+        max_history_items=MAX_HISTORY_ITEMS,
+        history_max_age_seconds=HISTORY_MAX_AGE_SECONDS
     )
     
     assistant.run()
