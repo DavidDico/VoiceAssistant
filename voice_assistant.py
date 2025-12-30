@@ -46,7 +46,7 @@ EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
 
 
 class VoiceAssistant:
-    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600):
+    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None):
         """
         Initialize the voice assistant.
         
@@ -58,6 +58,7 @@ class VoiceAssistant:
             tts_voice: OpenAI TTS voice (alloy, echo, fable, onyx, nova, shimmer)
             wake_word: Built-in wake word to use
             custom_wake_word_path: Path to custom .ppn file (overrides wake_word if provided)
+            porcupine_model_path: Path to Porcupine language model .pv file (optional, for non-English wake words)
             google_search_api_key: Google Custom Search API key (optional, for web search)
             google_search_engine_id: Google Custom Search Engine ID (optional, for web search)
             twilio_account_sid: Twilio Account SID (optional, for WhatsApp & SMS)
@@ -73,6 +74,7 @@ class VoiceAssistant:
             greetings_cache_dir: Directory to cache greeting audio files (optional, defaults to ~/.casimir_greetings)
             max_history_items: Maximum number of history items to keep (default 50)
             history_max_age_seconds: Maximum age of history items in seconds (default 3600 = 1 hour)
+            memory_file_path: Path to memory file (optional, defaults to ~/.casimir_memory.txt)
         """
         self.porcupine_access_key = porcupine_access_key
         self.openai_client = OpenAI(api_key=openai_api_key)
@@ -90,7 +92,8 @@ class VoiceAssistant:
             sms_contacts=sms_contacts,
             rss_feeds=rss_feeds,
             google_calendar_credentials_path=google_calendar_credentials_path,
-            google_calendar_id=google_calendar_id
+            google_calendar_id=google_calendar_id,
+            memory_file_path=memory_file_path
         )
         self.tools.assistant = self  # Give tools access to assistant for timer announcements
         
@@ -103,6 +106,7 @@ class VoiceAssistant:
         # Wake word settings
         self.wake_word = wake_word
         self.custom_wake_word_path = custom_wake_word_path
+        self.porcupine_model_path = porcupine_model_path
         
         # Greetings cache settings
         self.greetings_cache_dir = greetings_cache_dir or os.path.expanduser("~/.casimir_greetings")
@@ -239,23 +243,31 @@ class VoiceAssistant:
             # Use custom wake word file
             import pvporcupine
             
-            # Get the Porcupine package directory
-            porcupine_dir = os.path.dirname(pvporcupine.__file__)
+            # Determine model path
+            model_path = None
+            if self.porcupine_model_path and os.path.exists(self.porcupine_model_path):
+                # Use configured model path
+                model_path = self.porcupine_model_path
+                print(f"Utilisation du modèle configuré: {model_path}")
+            else:
+                # Try to find French model in package directory
+                porcupine_dir = os.path.dirname(pvporcupine.__file__)
+                french_model_path = os.path.join(porcupine_dir, "lib", "common", "porcupine_params_fr.pv")
+                
+                if os.path.exists(french_model_path):
+                    model_path = french_model_path
+                    print(f"Utilisation du modèle français: {model_path}")
+                else:
+                    print(f"⚠️ Modèle français non trouvé à: {french_model_path}")
+                    print(f"Tentative sans spécifier le modèle...")
             
-            # Path to French model (included in pvporcupine package)
-            french_model_path = os.path.join(porcupine_dir, "lib", "common", "porcupine_params_fr.pv")
-            
-            # Check if French model exists, otherwise use default
-            if os.path.exists(french_model_path):
-                print(f"Utilisation du modèle français: {french_model_path}")
+            if model_path:
                 self.porcupine = pvporcupine.create(
                     access_key=self.porcupine_access_key,
                     keyword_paths=[self.custom_wake_word_path],
-                    model_path=french_model_path
+                    model_path=model_path
                 )
             else:
-                print(f"⚠️ Modèle français non trouvé à: {french_model_path}")
-                print(f"Tentative sans spécifier le modèle...")
                 self.porcupine = pvporcupine.create(
                     access_key=self.porcupine_access_key,
                     keyword_paths=[self.custom_wake_word_path]
@@ -841,6 +853,10 @@ class VoiceAssistant:
                 return self.tools.add_calendar_event(**function_args)
             elif function_name == "random_choice":
                 return self.tools.random_choice(**function_args)
+            elif function_name == "get_memories":
+                return self.tools.get_memories()
+            elif function_name == "save_memories":
+                return self.tools.save_memories(**function_args)
             else:
                 return {"success": False, "error": f"Fonction inconnue: {function_name}"}
         except Exception as e:
@@ -850,10 +866,13 @@ class VoiceAssistant:
         """Split text into sentences based on punctuation and newlines."""
         import re
         
+        # First, join numbered list items with their content
+        # Replace "1.\n" or "1. " at start of line with "1: " to prevent splitting
+        text = re.sub(r'(\d+)\.\s*\n?', r'\1: ', text)
+        
         # Split on sentence-ending punctuation followed by space or end, or on newlines
-        # BUT don't split on numbers followed by period (like "1.", "2.")
-        # Use negative lookbehind to avoid splitting after digits
-        sentences = re.split(r'(?<![0-9])(?<=[.!?:])\s+|\n+', text)
+        # BUT don't split on colons after numbers (our numbered list format)
+        sentences = re.split(r'(?<![0-9])(?<=[.!?])\s+|\n+', text)
         
         # Filter out empty strings and strip whitespace
         sentences = [s.strip() for s in sentences if s.strip()]
@@ -1107,6 +1126,11 @@ if __name__ == "__main__":
     except ImportError:
         GREETINGS_CACHE_DIR = None
     
+    try:
+        from config import PORCUPINE_MODEL_PATH
+    except ImportError:
+        PORCUPINE_MODEL_PATH = None
+    
     # Optional: history configuration
     try:
         from config import MAX_HISTORY_ITEMS
@@ -1118,6 +1142,11 @@ if __name__ == "__main__":
     except ImportError:
         HISTORY_MAX_AGE_SECONDS = 3600  # Default: 1 hour
     
+    try:
+        from config import MEMORY_FILE_PATH
+    except ImportError:
+        MEMORY_FILE_PATH = None  # Default: ~/.casimir_memory.txt
+    
     # Create and run the assistant
     assistant = VoiceAssistant(
         porcupine_access_key=PORCUPINE_ACCESS_KEY,
@@ -1127,6 +1156,7 @@ if __name__ == "__main__":
         tts_voice=TTS_VOICE,
         wake_word=WAKE_WORD,
         custom_wake_word_path=CUSTOM_WAKE_WORD_PATH,
+        porcupine_model_path=PORCUPINE_MODEL_PATH,
         google_search_api_key=GOOGLE_SEARCH_API_KEY,
         google_search_engine_id=GOOGLE_SEARCH_ENGINE_ID,
         twilio_account_sid=TWILIO_ACCOUNT_SID,
@@ -1141,7 +1171,8 @@ if __name__ == "__main__":
         google_calendar_id=GOOGLE_CALENDAR_ID,
         greetings_cache_dir=GREETINGS_CACHE_DIR,
         max_history_items=MAX_HISTORY_ITEMS,
-        history_max_age_seconds=HISTORY_MAX_AGE_SECONDS
+        history_max_age_seconds=HISTORY_MAX_AGE_SECONDS,
+        memory_file_path=MEMORY_FILE_PATH
     )
     
     assistant.run()

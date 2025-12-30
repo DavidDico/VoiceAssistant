@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 class AssistantTools:
     """Tools/functions that the assistant can use to fetch real-time information."""
     
-    def __init__(self, openweather_api_key=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, google_calendar_credentials_path=None, google_calendar_id=None):
+    def __init__(self, openweather_api_key=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, google_calendar_credentials_path=None, google_calendar_id=None, memory_file_path=None):
         """
         Initialize tools with necessary API keys.
         
@@ -24,6 +24,7 @@ class AssistantTools:
             rss_feeds: Dictionary of category names to RSS feed URLs (optional)
             google_calendar_credentials_path: Path to Google OAuth credentials JSON file (optional)
             google_calendar_id: Google Calendar ID to use (optional, defaults to 'primary')
+            memory_file_path: Path to memory file (optional, defaults to ~/.casimir_memory.txt)
         """
         self.openweather_api_key = openweather_api_key
         self.google_search_api_key = google_search_api_key
@@ -38,6 +39,7 @@ class AssistantTools:
         self.google_calendar_credentials_path = google_calendar_credentials_path
         self.google_calendar_id = google_calendar_id or 'primary'
         self._calendar_service = None
+        self.memory_file_path = memory_file_path or os.path.expanduser("~/.casimir_memory.txt")
         
     def _get_calendar_service(self):
         """Get or create the Google Calendar service."""
@@ -926,6 +928,128 @@ class AssistantTools:
                 "success": False,
                 "error": f"Erreur lors du tirage aléatoire: {str(e)}"
             }
+    
+    def get_memories(self) -> Dict[str, Any]:
+        """
+        Read all stored memories.
+        
+        Returns:
+            Dictionary with memories content
+        """
+        print(f"[DEBUG Memory] Reading memories from {self.memory_file_path}")
+        
+        try:
+            if not os.path.exists(self.memory_file_path):
+                return {
+                    "success": True,
+                    "memories": [],
+                    "message": "Aucun souvenir enregistré."
+                }
+            
+            with open(self.memory_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            memories = data.get("memories", [])
+            
+            if not memories:
+                return {
+                    "success": True,
+                    "memories": [],
+                    "message": "Aucun souvenir enregistré."
+                }
+            
+            print(f"[DEBUG Memory] Read {len(memories)} memories")
+            
+            return {
+                "success": True,
+                "memories": memories,
+                "count": len(memories),
+                "message": f"{len(memories)} souvenir(s) récupéré(s)."
+            }
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"Erreur de format du fichier mémoire: {str(e)}"
+            print(f"[DEBUG Memory] ERROR: {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg
+            }
+        except Exception as e:
+            error_msg = f"Erreur lors de la lecture des souvenirs: {str(e)}"
+            print(f"[DEBUG Memory] ERROR: {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg
+            }
+    
+    def save_memories(self, memories: list) -> Dict[str, Any]:
+        """
+        Save memories (replaces all existing memories).
+        
+        Args:
+            memories: List of memory objects. Each object should have:
+                      - "content": The memory text
+                      - "created_at": (optional) ISO timestamp when first created
+                      - "updated_at": (optional) ISO timestamp when last updated
+                      New items without timestamps will have them added automatically.
+            
+        Returns:
+            Dictionary with save status
+        """
+        print(f"[DEBUG Memory] Saving memories to {self.memory_file_path}")
+        
+        try:
+            # Handle empty list (clearing all memories)
+            if not memories:
+                if os.path.exists(self.memory_file_path):
+                    os.remove(self.memory_file_path)
+                    print("[DEBUG Memory] Memory file deleted")
+                return {
+                    "success": True,
+                    "message": "Tous les souvenirs ont été effacés."
+                }
+            
+            now = datetime.datetime.now().isoformat()
+            
+            # Process each memory item
+            processed_memories = []
+            for item in memories:
+                if isinstance(item, str):
+                    # Simple string, create new memory object
+                    processed_memories.append({
+                        "content": item,
+                        "created_at": now,
+                        "updated_at": now
+                    })
+                elif isinstance(item, dict):
+                    # Already a dict, ensure it has timestamps
+                    memory = {
+                        "content": item.get("content", ""),
+                        "created_at": item.get("created_at", now),
+                        "updated_at": now  # Always update the updated_at timestamp
+                    }
+                    processed_memories.append(memory)
+            
+            data = {"memories": processed_memories}
+            
+            with open(self.memory_file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            print(f"[DEBUG Memory] Saved {len(processed_memories)} memories")
+            
+            return {
+                "success": True,
+                "count": len(processed_memories),
+                "message": f"{len(processed_memories)} souvenir(s) enregistré(s)."
+            }
+            
+        except Exception as e:
+            error_msg = f"Erreur lors de l'enregistrement des souvenirs: {str(e)}"
+            print(f"[DEBUG Memory] ERROR: {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg
+            }
 
 
 # Define the function schemas for OpenAI function calling
@@ -1174,6 +1298,53 @@ TOOL_FUNCTIONS = [
                     }
                 },
                 "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_memories",
+            "description": "Lire les souvenirs enregistrés. Utiliser quand l'utilisateur demande ce que tu as retenu, ce dont tu te souviens, ou veut consulter ses notes/informations sauvegardées. Retourne une liste d'objets avec 'content', 'created_at' et 'updated_at'.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memories",
+            "description": "Enregistrer des souvenirs. Utiliser quand l'utilisateur demande de retenir, mémoriser, noter ou sauvegarder une information. IMPORTANT: Toujours appeler get_memories d'abord, puis modifier la liste et la renvoyer complète. Pour ajouter: ajouter un nouvel objet {'content': '...'} à la liste. Pour modifier: mettre à jour le 'content' de l'objet existant (garder son 'created_at'). Pour supprimer: retirer l'objet de la liste. Pour tout effacer: envoyer une liste vide [].",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memories": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "description": "Le contenu du souvenir"
+                                },
+                                "created_at": {
+                                    "type": "string",
+                                    "description": "Date de création ISO (conserver si existant)"
+                                },
+                                "updated_at": {
+                                    "type": "string",
+                                    "description": "Date de mise à jour ISO (sera mis à jour automatiquement)"
+                                }
+                            },
+                            "required": ["content"]
+                        },
+                        "description": "Liste complète des souvenirs à sauvegarder"
+                    }
+                },
+                "required": ["memories"]
             }
         }
     }
