@@ -1,6 +1,5 @@
 # Specific config files
 calendar_credentials.json
-Casimir_fr_windows_v4_0_0.ppn
 google-credentials.json
 keys.txt
 token.pickle
@@ -8,3 +7,4 @@ twilio recovery.txt
 config.py
 
 __pycache__/
+/config.zip
