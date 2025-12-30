@@ -193,7 +193,7 @@ class VoiceAssistant:
         INFORMATION IMPORTANTE: Nous sommes le {current_date} et il est {current_time}.
         Utilise cette information pour répondre aux questions sur "aujourd'hui", "hier", "demain", etc.
         
-        LOCALISATION: {f"L'utilisateur se trouve à {self.default_city}. Si on te demande la météo sans préciser de ville, utilise {self.default_city}." if self.default_city else "Aucune ville par défaut configurée. Demande la ville si l'utilisateur ne la précise pas."}
+        LOCALISATION: {f"L'utilisateur se trouve à {self.default_city}. Utilise {self.default_city} UNIQUEMENT si l'utilisateur demande la météo sans mentionner aucune ville (ex: 'quel temps fait-il ?'). Si l'utilisateur mentionne une ville spécifique (ex: 'météo à Paris', 'temps à Lyon'), utilise TOUJOURS la ville qu'il a mentionnée, pas {self.default_city}." if self.default_city else "Aucune ville par défaut configurée. Demande la ville si l'utilisateur ne la précise pas."}
         
         ACTUALITÉS: Quand tu reçois des actualités, sélectionne les 2-3 plus importantes ou intéressantes et résume-les 
         de façon concise (environ 3 phrases au total). Ne liste pas tous les articles.
@@ -728,7 +728,21 @@ class VoiceAssistant:
                     
                 if not result.is_final:
                     last_interim_transcript = result.alternatives[0].transcript
-                    print(f"   (provisoire: {last_interim_transcript})", end='\r')
+                    # Truncate to console width to avoid wrapping issues
+                    try:
+                        console_width = os.get_terminal_size().columns
+                    except:
+                        console_width = 80
+                    prefix = "   (provisoire: "
+                    suffix = "...)"
+                    max_text_len = console_width - len(prefix) - len(suffix) - 1
+                    if len(last_interim_transcript) > max_text_len:
+                        display_text = prefix + last_interim_transcript[:max_text_len] + suffix
+                    else:
+                        display_text = prefix + last_interim_transcript + ")"
+                    # Pad with spaces to clear previous longer text
+                    display_text = display_text.ljust(console_width - 1)
+                    print(display_text, end='\r')
                 else:
                     last_final_transcript = result.alternatives[0].transcript
                     transcript = last_final_transcript
@@ -787,70 +801,78 @@ class VoiceAssistant:
                 # Select model based on boost mode
                 model = "gpt-4o" if self._boost_mode else "gpt-4o-mini"
                 
-                response = self.openai_client.chat.completions.create(
+                # First, try streaming response
+                # We need to detect if it's a tool call or text response
+                stream = self.openai_client.chat.completions.create(
                     model=model,
                     messages=messages,
                     tools=EXTENDED_TOOL_FUNCTIONS,
                     tool_choice="auto",
                     max_tokens=150,
-                    temperature=0.7
+                    temperature=0.7,
+                    stream=True
                 )
                 
-                response_message = response.choices[0].message
+                # Process the stream
+                result = self._process_streaming_response(stream)
                 
-                # If no tool calls, we have our final response
-                if not response_message.tool_calls:
-                    assistant_message = response_message.content
+                # If it's a text response (no tool calls), we're done
+                if result["type"] == "text":
+                    assistant_message = result["content"]
                     break
                 
-                # Process all tool calls from this response
-                tool_calls_for_history = []
-                for tool_call in response_message.tool_calls:
-                    tool_calls_for_history.append({
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments
-                        }
-                    })
-                
-                self._add_to_history({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": tool_calls_for_history
-                })
-                
-                # Execute each tool and add results
-                for tool_call in response_message.tool_calls:
-                    function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
+                # If it's a tool call, handle it
+                elif result["type"] == "tool_calls":
+                    tool_calls = result["tool_calls"]
                     
-                    print(f"🔧 Appel de fonction: {function_name}({function_args})")
+                    # Build tool calls for history
+                    tool_calls_for_history = []
+                    for tc in tool_calls:
+                        tool_calls_for_history.append({
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"]
+                            }
+                        })
                     
-                    # Handle end_conversation function
-                    if function_name == "end_conversation":
-                        print(f"   → Fin de conversation demandée")
-                        self._conversation_should_end = True
-                        function_result = {"success": True, "message": "Conversation terminée"}
-                    elif function_name == "enable_boost_mode":
-                        print(f"   → Mode boost activé (gpt-4o)")
-                        self._boost_mode = True
-                        function_result = {"success": True, "message": "Mode intelligence augmentée activé. J'utilise maintenant un modèle plus performant."}
-                    elif function_name == "disable_boost_mode":
-                        print(f"   → Mode boost désactivé (gpt-4o-mini)")
-                        self._boost_mode = False
-                        function_result = {"success": True, "message": "Mode normal rétabli."}
-                    else:
-                        # Execute other tool functions
-                        function_result = self._execute_tool(function_name, function_args)
-                    
-                    # Add tool result to conversation
                     self._add_to_history({
-                        "role": "tool",
-                        "content": json.dumps(function_result, ensure_ascii=False),
-                        "tool_call_id": tool_call.id
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls_for_history
                     })
+                    
+                    # Execute each tool and add results
+                    for tc in tool_calls:
+                        function_name = tc["name"]
+                        function_args = json.loads(tc["arguments"])
+                        
+                        print(f"🔧 Appel de fonction: {function_name}({function_args})")
+                        
+                        # Handle end_conversation function
+                        if function_name == "end_conversation":
+                            print(f"   → Fin de conversation demandée")
+                            self._conversation_should_end = True
+                            function_result = {"success": True, "message": "Conversation terminée"}
+                        elif function_name == "enable_boost_mode":
+                            print(f"   → Mode boost activé (gpt-4o)")
+                            self._boost_mode = True
+                            function_result = {"success": True, "message": "Mode intelligence augmentée activé. J'utilise maintenant un modèle plus performant."}
+                        elif function_name == "disable_boost_mode":
+                            print(f"   → Mode boost désactivé (gpt-4o-mini)")
+                            self._boost_mode = False
+                            function_result = {"success": True, "message": "Mode normal rétabli."}
+                        else:
+                            # Execute other tool functions
+                            function_result = self._execute_tool(function_name, function_args)
+                        
+                        # Add tool result to conversation
+                        self._add_to_history({
+                            "role": "tool",
+                            "content": json.dumps(function_result, ensure_ascii=False),
+                            "tool_call_id": tc["id"]
+                        })
             
             # Add assistant response to history
             if assistant_message:
@@ -861,8 +883,8 @@ class VoiceAssistant:
                 
                 print(f"💬 Assistant: {assistant_message}")
                 
-                # Speak the response
-                self.speak(assistant_message)
+                # Note: speak was already called during streaming for text responses
+                # Only speak here if streaming didn't handle it (shouldn't happen normally)
                 
                 # Fallback: if user said an end phrase and GPT didn't call end_conversation, end anyway
                 if is_likely_end and not self._conversation_should_end:
@@ -873,6 +895,198 @@ class VoiceAssistant:
             print(f"❌ Erreur lors du traitement de la commande: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _process_streaming_response(self, stream):
+        """
+        Process a streaming response from GPT.
+        
+        Returns a dict with either:
+        - {"type": "text", "content": "full text"} for text responses
+        - {"type": "tool_calls", "tool_calls": [...]} for tool calls
+        
+        For text responses, TTS is started as sentences are detected.
+        """
+        import re
+        
+        # Accumulators
+        full_content = ""
+        current_buffer = ""
+        tool_calls = {}  # id -> {id, name, arguments}
+        
+        # Track what we're receiving
+        is_tool_call = False
+        
+        # TTS pipeline - two queues for parallel generation and playback
+        sentence_queue = queue.Queue()  # Sentences waiting for TTS generation
+        audio_queue = queue.Queue()     # Audio files ready to play
+        tts_generator_thread = None
+        audio_player_thread = None
+        tts_started = False
+        generation_done = threading.Event()
+        
+        def tts_generator_worker():
+            """Background thread that generates TTS for sentences."""
+            try:
+                while True:
+                    try:
+                        sentence = sentence_queue.get(timeout=1)
+                        if sentence is None:  # Poison pill
+                            break
+                        
+                        print(f"   🎵 TTS: \"{sentence[:40]}{'...' if len(sentence) > 40 else ''}\"")
+                        audio_path = self._generate_tts_audio(sentence)
+                        audio_queue.put(audio_path)
+                        
+                    except queue.Empty:
+                        # Check if we're done receiving sentences
+                        if generation_done.is_set():
+                            break
+                        continue
+            finally:
+                audio_queue.put(None)  # Signal player that generation is done
+        
+        def audio_player_worker():
+            """Background thread that plays audio files."""
+            with self._audio_lock:
+                self._is_speaking = True
+                
+                try:
+                    first_sentence = True
+                    while True:
+                        try:
+                            audio_path = audio_queue.get(timeout=30)
+                            if audio_path is None:  # Poison pill
+                                break
+                            
+                            # Wake up headset before first sentence
+                            if first_sentence:
+                                self._play_headset_wakeup()
+                                first_sentence = False
+                            else:
+                                time.sleep(0.1)  # Small pause between sentences
+                            
+                            self._play_audio_file(audio_path)
+                            
+                            try:
+                                os.unlink(audio_path)
+                            except:
+                                pass
+                                
+                        except queue.Empty:
+                            break
+                finally:
+                    self._is_speaking = False
+        
+        def extract_complete_sentence(buffer):
+            """
+            Extract a complete sentence from buffer if available.
+            Returns (sentence, remaining_buffer) or (None, buffer) if no complete sentence.
+            
+            Handles bullet numbers like "1." by not treating them as sentence ends.
+            """
+            if not buffer:
+                return None, buffer
+            
+            # First, normalize bullet numbers: "1." or "1. " at start -> "1: "
+            # But only if followed by more text
+            normalized = re.sub(r'^(\d+)\.\s*', r'\1: ', buffer)
+            
+            # Look for sentence-ending punctuation
+            # Match . ! ? followed by space or end of string
+            # But not after a digit (to avoid "1." being treated as sentence end)
+            match = re.search(r'(?<![0-9])([.!?])\s+', normalized)
+            
+            if match:
+                # Found a sentence boundary
+                end_pos = match.end()
+                sentence = normalized[:match.start() + 1].strip()
+                remaining = normalized[end_pos:]
+                return sentence, remaining
+            
+            # Check if buffer ends with sentence-ending punctuation (final sentence)
+            # But not if it's just a number followed by period
+            if normalized and normalized[-1] in '.!?' and not re.match(r'^\d+\.$', normalized.strip()):
+                return normalized.strip(), ""
+            
+            return None, buffer
+        
+        # Process the stream
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            
+            if delta is None:
+                continue
+            
+            # Check for tool calls
+            if delta.tool_calls:
+                is_tool_call = True
+                for tc in delta.tool_calls:
+                    tc_id = tc.id or list(tool_calls.keys())[-1] if tool_calls else None
+                    
+                    if tc.id:  # New tool call
+                        tool_calls[tc.id] = {
+                            "id": tc.id,
+                            "name": tc.function.name if tc.function and tc.function.name else "",
+                            "arguments": tc.function.arguments if tc.function and tc.function.arguments else ""
+                        }
+                    elif tc_id:  # Continuation of existing tool call
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls[tc_id]["name"] += tc.function.name
+                            if tc.function.arguments:
+                                tool_calls[tc_id]["arguments"] += tc.function.arguments
+            
+            # Check for content
+            if delta.content:
+                content_chunk = delta.content
+                full_content += content_chunk
+                current_buffer += content_chunk
+                
+                # Start TTS threads on first content if not started
+                if not tts_started and not is_tool_call:
+                    tts_started = True
+                    tts_generator_thread = threading.Thread(target=tts_generator_worker, daemon=True)
+                    audio_player_thread = threading.Thread(target=audio_player_worker, daemon=True)
+                    tts_generator_thread.start()
+                    audio_player_thread.start()
+                    print("🔊 Streaming TTS...")
+                
+                # Try to extract complete sentences
+                while True:
+                    sentence, current_buffer = extract_complete_sentence(current_buffer)
+                    if sentence:
+                        sentence_queue.put(sentence)
+                    else:
+                        break
+        
+        # Handle any remaining text in buffer
+        if current_buffer.strip() and not is_tool_call:
+            # Normalize any remaining bullet numbers
+            remaining = re.sub(r'^(\d+)\.\s*', r'\1: ', current_buffer.strip())
+            if remaining:
+                sentence_queue.put(remaining)
+        
+        # Signal TTS generator that we're done sending sentences
+        generation_done.set()
+        sentence_queue.put(None)  # Poison pill for generator
+        
+        # Wait for threads to finish
+        if tts_generator_thread:
+            tts_generator_thread.join(timeout=60)
+        if audio_player_thread:
+            audio_player_thread.join(timeout=60)
+        
+        # Return appropriate result
+        if is_tool_call:
+            return {
+                "type": "tool_calls",
+                "tool_calls": list(tool_calls.values())
+            }
+        else:
+            return {
+                "type": "text",
+                "content": full_content
+            }
     
     def _execute_tool(self, function_name: str, function_args: dict):
         """Execute a tool function and return the result."""
