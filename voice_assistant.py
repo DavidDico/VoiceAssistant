@@ -839,6 +839,8 @@ class VoiceAssistant:
                 return self.tools.get_calendar_events(**function_args)
             elif function_name == "add_calendar_event":
                 return self.tools.add_calendar_event(**function_args)
+            elif function_name == "random_choice":
+                return self.tools.random_choice(**function_args)
             else:
                 return {"success": False, "error": f"Fonction inconnue: {function_name}"}
         except Exception as e:

@@ -1,4 +1,4 @@
-[ ] Fonction "aléatoire" pour les prises de décisions.
+[x] Fonction "aléatoire" pour les prises de décisions.
 [ ] Mémoire à long terme.
 [ ] Système de messagerie qui fonctionne comme un répondeur ("vous avez deux messages", etc).
 [x] Remplacer le bip par du tts ("oui ?", "j'écoute", "à votre service").

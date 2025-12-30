@@ -836,6 +836,96 @@ class AssistantTools:
                 "success": False,
                 "error": error_msg
             }
+    
+    def random_choice(self, mode: str = "dice", sides: int = 6, choices: list = None) -> Dict[str, Any]:
+        """
+        Make a random choice - roll dice, flip coin, or pick from options.
+        
+        Args:
+            mode: "dice" for rolling dice, "choice" for picking from options, "coin" for coin flip, "number" for random number
+            sides: Number of sides on the dice (default 6, only used in dice mode) or max number in number mode
+            choices: List of options to choose from (only used in choice mode)
+            
+        Returns:
+            Dictionary with the random result
+        """
+        import random
+        
+        print(f"[DEBUG Random] mode={mode}, sides={sides}, choices={choices}")
+        
+        try:
+            if mode == "dice":
+                if sides < 2:
+                    return {
+                        "success": False,
+                        "error": "Un dé doit avoir au moins 2 faces"
+                    }
+                if sides > 1000:
+                    return {
+                        "success": False,
+                        "error": "Maximum 1000 faces pour un dé"
+                    }
+                
+                result = random.randint(1, sides)
+                
+                return {
+                    "success": True,
+                    "mode": "dice",
+                    "sides": sides,
+                    "result": result,
+                    "message": f"Le dé à {sides} faces indique: {result}"
+                }
+            
+            elif mode == "choice":
+                if not choices or len(choices) < 2:
+                    return {
+                        "success": False,
+                        "error": "Il faut au moins 2 choix pour faire une sélection aléatoire"
+                    }
+                
+                result = random.choice(choices)
+                
+                return {
+                    "success": True,
+                    "mode": "choice",
+                    "options": choices,
+                    "result": result,
+                    "message": f"Parmi {len(choices)} options, le choix est: {result}"
+                }
+            
+            elif mode == "coin":
+                result = random.choice(["pile", "face"])
+                
+                return {
+                    "success": True,
+                    "mode": "coin",
+                    "result": result,
+                    "message": f"La pièce tombe sur: {result}"
+                }
+            
+            elif mode == "number":
+                max_num = sides if sides > 1 else 100
+                result = random.randint(1, max_num)
+                
+                return {
+                    "success": True,
+                    "mode": "number",
+                    "max": max_num,
+                    "result": result,
+                    "message": f"Nombre aléatoire entre 1 et {max_num}: {result}"
+                }
+            
+            else:
+                return {
+                    "success": False,
+                    "error": f"Mode inconnu: {mode}. Utilisez 'dice', 'choice', 'coin', ou 'number'"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Erreur lors du tirage aléatoire: {str(e)}"
+            }
 
 
 # Define the function schemas for OpenAI function calling
@@ -1053,6 +1143,37 @@ TOOL_FUNCTIONS = [
                     }
                 },
                 "required": ["title", "date"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "random_choice",
+            "description": "Faire un tirage aléatoire UNIQUEMENT quand l'utilisateur demande EXPLICITEMENT le hasard. Utilisé pour: 'lance un dé', 'pile ou face', 'tire au sort', 'au hasard', 'aléatoirement', 'randomly'. NE PAS utiliser si l'utilisateur demande de l'aide pour choisir, des conseils, ou une recommandation - dans ces cas, donner des conseils utiles à la place.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": "Type de tirage: 'dice' (dé), 'coin' (pile ou face), 'choice' (choisir parmi options), 'number' (nombre aléatoire)",
+                        "enum": ["dice", "coin", "choice", "number"],
+                        "default": "dice"
+                    },
+                    "sides": {
+                        "type": "integer",
+                        "description": "Nombre de faces du dé (défaut: 6) ou nombre maximum pour le mode 'number'",
+                        "default": 6
+                    },
+                    "choices": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Liste des options parmi lesquelles choisir (uniquement pour le mode 'choice')"
+                    }
+                },
+                "required": []
             }
         }
     }
