@@ -19,12 +19,12 @@ from assistant_tools import AssistantTools, TOOL_FUNCTIONS
 # =============================================================================
 WAKE_WORD_GREETINGS = [
     "Oui ?",
-    "Je vous écoute",
+    "Je t'écoute",
     "À votre service",
-    "Que puis-je faire pour vous ?",
+    "Que puis-je faire pour toi ?",
     "Je suis là",
     "Dites-moi",
-    "Comment puis-je vous aider ?",
+    "Comment puis-je t'aider ?",
 ]
 # =============================================================================
 
