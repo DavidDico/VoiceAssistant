@@ -28,6 +28,21 @@ WAKE_WORD_GREETINGS = [
 ]
 # =============================================================================
 
+# =============================================================================
+# FILLER PHRASES - Played while waiting for function calls
+# =============================================================================
+FILLER_PHRASES = [
+    "Hmm...",
+    "Ok...",
+    "Alors...",
+    "Voyons voir...",
+    "Euh...",
+    "Une seconde...",
+    "Je regarde...",
+    "Attends...",
+]
+# =============================================================================
+
 # Extended tool functions with conversation control
 EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
     {
@@ -67,6 +82,13 @@ EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
         }
     }
 ]
+
+# Functions that should NOT trigger filler phrases (fast/instant functions)
+NO_FILLER_FUNCTIONS = {
+    "end_conversation",
+    "enable_boost_mode",
+    "disable_boost_mode",
+}
 
 
 class VoiceAssistant:
@@ -136,7 +158,9 @@ class VoiceAssistant:
         # Greetings cache settings
         self.greetings_cache_dir = greetings_cache_dir or os.path.expanduser("~/.casimir_greetings")
         self._greeting_files = {}  # Cache of greeting text -> file path
+        self._filler_files = {}    # Cache of filler phrase -> file path
         self._ensure_greetings_cached()
+        self._ensure_fillers_cached()
         
         # Set Google credentials if provided
         if google_credentials_path:
@@ -270,6 +294,73 @@ class VoiceAssistant:
         
         print(f"📁 Cache des salutations: {self.greetings_cache_dir}")
         print(f"   {len(self._greeting_files)}/{len(WAKE_WORD_GREETINGS)} salutations prêtes\n")
+    
+    def _ensure_fillers_cached(self):
+        """Ensure all filler phrases are cached as audio files."""
+        # Use the same cache directory as greetings
+        os.makedirs(self.greetings_cache_dir, exist_ok=True)
+        
+        print("🔊 Vérification du cache des phrases de remplissage...")
+        
+        for filler in FILLER_PHRASES:
+            filename = self._get_filler_filename(filler)
+            filepath = os.path.join(self.greetings_cache_dir, filename)
+            
+            if os.path.exists(filepath):
+                # File already cached
+                self._filler_files[filler] = filepath
+                print(f"   ✓ Filler en cache: \"{filler}\"")
+            else:
+                # Need to generate TTS
+                print(f"   🎤 Génération TTS pour: \"{filler}\"...")
+                try:
+                    response = self.openai_client.audio.speech.create(
+                        model="tts-1",
+                        voice=self.tts_voice,
+                        input=filler
+                    )
+                    
+                    with open(filepath, 'wb') as f:
+                        f.write(response.content)
+                    
+                    self._filler_files[filler] = filepath
+                    print(f"   ✓ Filler généré et mis en cache: \"{filler}\"")
+                    
+                except Exception as e:
+                    print(f"   ❌ Erreur lors de la génération de \"{filler}\": {e}")
+        
+        print(f"   {len(self._filler_files)}/{len(FILLER_PHRASES)} fillers prêts\n")
+    
+    def _get_filler_filename(self, filler_text):
+        """Generate a safe filename for a filler phrase."""
+        import hashlib
+        text_hash = hashlib.md5(filler_text.encode('utf-8')).hexdigest()[:12]
+        return f"filler_{self.tts_voice}_{text_hash}.mp3"
+    
+    def _play_filler_async(self):
+        """Play a random filler phrase asynchronously. Returns the thread so caller can wait for it."""
+        available_fillers = [f for f in FILLER_PHRASES if f in self._filler_files]
+        
+        if not available_fillers:
+            return None
+        
+        filler = random.choice(available_fillers)
+        filepath = self._filler_files[filler]
+        
+        print(f"   💭 \"{filler}\"")
+        
+        def play_filler():
+            with self._audio_lock:
+                self._is_speaking = True
+                try:
+                    self._play_headset_wakeup()
+                    self._play_audio_file(filepath)
+                finally:
+                    self._is_speaking = False
+        
+        thread = threading.Thread(target=play_filler, daemon=True)
+        thread.start()
+        return thread
         
     def initialize_porcupine(self):
         """Initialize Porcupine with a wake word."""
@@ -764,6 +855,9 @@ class VoiceAssistant:
         """Send command to OpenAI GPT with function calling support and speak the response."""
         print("🤖 Traitement avec GPT...")
         
+        # Reset filler flag for this interaction
+        self._filler_played_this_interaction = False
+        
         # Check for end phrases locally as a fallback
         end_phrases = [
             "merci", "ok merci", "merci beaucoup", "thanks",
@@ -825,6 +919,15 @@ class VoiceAssistant:
                 elif result["type"] == "tool_calls":
                     tool_calls = result["tool_calls"]
                     
+                    # Play a filler phrase on first tool call of this interaction
+                    # Only if at least one function in this batch should trigger a filler
+                    filler_thread = None
+                    should_play_filler = any(tc["name"] not in NO_FILLER_FUNCTIONS for tc in tool_calls)
+                    
+                    if should_play_filler and not self._filler_played_this_interaction:
+                        self._filler_played_this_interaction = True
+                        filler_thread = self._play_filler_async()
+                    
                     # Build tool calls for history
                     tool_calls_for_history = []
                     for tc in tool_calls:
@@ -873,6 +976,10 @@ class VoiceAssistant:
                             "content": json.dumps(function_result, ensure_ascii=False),
                             "tool_call_id": tc["id"]
                         })
+                    
+                    # Wait for filler to finish before continuing to next iteration
+                    if filler_thread and filler_thread.is_alive():
+                        filler_thread.join()
             
             # Add assistant response to history
             if assistant_message:
