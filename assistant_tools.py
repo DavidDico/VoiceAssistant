@@ -803,11 +803,12 @@ class AssistantTools:
             
             print(f"[DEBUG News] Nombre d'entrées: {len(feed.entries)}")
             
-            # Only take first 3 articles for brevity (was 5)
+            # Return up to 10 articles, let GPT choose the most important ones
             articles = []
-            for entry in feed.entries[:3]:
+            for entry in feed.entries[:10]:
                 articles.append({
                     "title": entry.get("title", ""),
+                    "summary": entry.get("summary", "")[:200] if entry.get("summary") else ""
                 })
             
             print(f"[DEBUG News] Articles récupérés: {len(articles)}")
@@ -819,7 +820,7 @@ class AssistantTools:
                 "category": category,
                 "articles": articles,
                 "total_results": len(articles),
-                "instruction": "Présente ces titres de façon concise, en une phrase par titre maximum."
+                "instruction": "Sélectionne les 2-3 actualités les plus importantes et résume-les en environ 3 phrases au total. Ne liste pas tout."
             }
             
         except ImportError:
@@ -1195,7 +1196,7 @@ TOOL_FUNCTIONS = [
         "type": "function",
         "function": {
             "name": "get_news",
-            "description": "Obtenir les 3 derniers titres d'actualités françaises. Présenter de façon très concise.",
+            "description": "Obtenir les dernières actualités françaises. Retourne plusieurs articles parmi lesquels tu dois choisir les 2-3 plus importants et les résumer brièvement.",
             "parameters": {
                 "type": "object",
                 "properties": {

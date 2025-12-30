@@ -20,10 +20,10 @@ from assistant_tools import AssistantTools, TOOL_FUNCTIONS
 WAKE_WORD_GREETINGS = [
     "Oui ?",
     "Je t'écoute",
-    "À votre service",
+    "À ton service",
     "Que puis-je faire pour toi ?",
     "Je suis là",
-    "Dites-moi",
+    "Dis-moi",
     "Comment puis-je t'aider ?",
 ]
 # =============================================================================
@@ -41,12 +41,36 @@ EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enable_boost_mode",
+            "description": "Activer le mode intelligence augmentée (GPT-4o). Utiliser quand l'utilisateur demande d'être plus intelligent, plus performant, de réfléchir mieux, d'utiliser un meilleur modèle, ou dit des choses comme 'sois plus malin', 'réfléchis mieux', 'mode turbo', 'boost', etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_boost_mode",
+            "description": "Désactiver le mode intelligence augmentée et revenir au mode normal. Utiliser quand l'utilisateur demande de revenir en mode normal, d'arrêter le boost, de désactiver le turbo, ou dit des choses comme 'mode normal', 'arrête le boost', 'reviens en mode standard', etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
 
 class VoiceAssistant:
-    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None):
+    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None):
         """
         Initialize the voice assistant.
         
@@ -75,6 +99,7 @@ class VoiceAssistant:
             max_history_items: Maximum number of history items to keep (default 50)
             history_max_age_seconds: Maximum age of history items in seconds (default 3600 = 1 hour)
             memory_file_path: Path to memory file (optional, defaults to ~/.casimir_memory.txt)
+            default_city: Default city for weather queries (optional, e.g., "Paris")
         """
         self.porcupine_access_key = porcupine_access_key
         self.openai_client = OpenAI(api_key=openai_api_key)
@@ -133,6 +158,10 @@ class VoiceAssistant:
         # Conversation state
         self._conversation_active = False
         self._conversation_should_end = False
+        self._boost_mode = False  # When True, use gpt-4o instead of gpt-4o-mini
+        
+        # Location settings
+        self.default_city = default_city
         
         # History configuration
         self.max_history_items = max_history_items
@@ -163,6 +192,11 @@ class VoiceAssistant:
         
         INFORMATION IMPORTANTE: Nous sommes le {current_date} et il est {current_time}.
         Utilise cette information pour répondre aux questions sur "aujourd'hui", "hier", "demain", etc.
+        
+        LOCALISATION: {f"L'utilisateur se trouve à {self.default_city}. Si on te demande la météo sans préciser de ville, utilise {self.default_city}." if self.default_city else "Aucune ville par défaut configurée. Demande la ville si l'utilisateur ne la précise pas."}
+        
+        ACTUALITÉS: Quand tu reçois des actualités, sélectionne les 2-3 plus importantes ou intéressantes et résume-les 
+        de façon concise (environ 3 phrases au total). Ne liste pas tous les articles.
         
         MESSAGES SMS ET WHATSAPP:
         Quand l'utilisateur dit "envoie-moi un SMS", "envoie-moi un message", "envoie-moi un WhatsApp" ou utilise 
@@ -389,6 +423,7 @@ class VoiceAssistant:
         self.play_end_conversation_sound()
         print("👋 Conversation terminée - Retour au mode mot d'activation\n")
         self._conversation_active = False
+        self._boost_mode = False  # Reset boost mode for next conversation
     
     def play_acknowledgment_greeting(self):
         """Play a random voice greeting to acknowledge wake word detection."""
@@ -749,8 +784,11 @@ class VoiceAssistant:
                 
                 messages = [{"role": "system", "content": self.system_prompt}] + self._get_messages_for_api()
                 
+                # Select model based on boost mode
+                model = "gpt-4o" if self._boost_mode else "gpt-4o-mini"
+                
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=model,
                     messages=messages,
                     tools=EXTENDED_TOOL_FUNCTIONS,
                     tool_choice="auto",
@@ -795,6 +833,14 @@ class VoiceAssistant:
                         print(f"   → Fin de conversation demandée")
                         self._conversation_should_end = True
                         function_result = {"success": True, "message": "Conversation terminée"}
+                    elif function_name == "enable_boost_mode":
+                        print(f"   → Mode boost activé (gpt-4o)")
+                        self._boost_mode = True
+                        function_result = {"success": True, "message": "Mode intelligence augmentée activé. J'utilise maintenant un modèle plus performant."}
+                    elif function_name == "disable_boost_mode":
+                        print(f"   → Mode boost désactivé (gpt-4o-mini)")
+                        self._boost_mode = False
+                        function_result = {"success": True, "message": "Mode normal rétabli."}
                     else:
                         # Execute other tool functions
                         function_result = self._execute_tool(function_name, function_args)
@@ -1147,6 +1193,11 @@ if __name__ == "__main__":
     except ImportError:
         MEMORY_FILE_PATH = None  # Default: ~/.casimir_memory.txt
     
+    try:
+        from config import DEFAULT_CITY
+    except ImportError:
+        DEFAULT_CITY = None  # No default city
+    
     # Create and run the assistant
     assistant = VoiceAssistant(
         porcupine_access_key=PORCUPINE_ACCESS_KEY,
@@ -1172,7 +1223,8 @@ if __name__ == "__main__":
         greetings_cache_dir=GREETINGS_CACHE_DIR,
         max_history_items=MAX_HISTORY_ITEMS,
         history_max_age_seconds=HISTORY_MAX_AGE_SECONDS,
-        memory_file_path=MEMORY_FILE_PATH
+        memory_file_path=MEMORY_FILE_PATH,
+        default_city=DEFAULT_CITY
     )
     
     assistant.run()
