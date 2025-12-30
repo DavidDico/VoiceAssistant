@@ -1208,6 +1208,8 @@ class VoiceAssistant:
                 return self.tools.set_timer(**function_args)
             elif function_name == "search_web":
                 return self.tools.search_web(**function_args)
+            elif function_name == "load_webpage":
+                return self.tools.load_webpage(**function_args)
             elif function_name == "send_whatsapp_message":
                 return self.tools.send_whatsapp_message(**function_args)
             elif function_name == "send_sms":

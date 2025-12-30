@@ -584,6 +584,102 @@ class AssistantTools:
                 "error": str(e)
             }
     
+    def load_webpage(self, url: str, max_length: int = 8000) -> Dict[str, Any]:
+        """
+        Load and extract text content from a webpage.
+        
+        Args:
+            url: URL of the webpage to load
+            max_length: Maximum length of text to return (default 8000 chars)
+            
+        Returns:
+            Dictionary with page content
+        """
+        print(f"[DEBUG Webpage] Loading: {url}")
+        
+        try:
+            # Set a reasonable timeout and headers to appear as a browser
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
+            }
+            
+            response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+            response.raise_for_status()
+            
+            # Try to get the encoding right
+            if response.encoding is None or response.encoding == 'ISO-8859-1':
+                response.encoding = response.apparent_encoding or 'utf-8'
+            
+            html_content = response.text
+            
+            # Parse with BeautifulSoup
+            try:
+                from bs4 import BeautifulSoup
+            except ImportError:
+                return {
+                    "success": False,
+                    "error": "BeautifulSoup non installé. Installez avec: pip install beautifulsoup4"
+                }
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Remove script and style elements
+            for element in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe', 'noscript']):
+                element.decompose()
+            
+            # Try to find main content area
+            main_content = None
+            for selector in ['main', 'article', '[role="main"]', '.content', '#content', '.post', '.entry']:
+                main_content = soup.select_one(selector)
+                if main_content:
+                    break
+            
+            # If no main content found, use body
+            if not main_content:
+                main_content = soup.body if soup.body else soup
+            
+            # Extract text
+            text = main_content.get_text(separator='\n', strip=True)
+            
+            # Clean up whitespace
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            text = '\n'.join(lines)
+            
+            # Truncate if too long
+            if len(text) > max_length:
+                text = text[:max_length] + "\n\n[... contenu tronqué ...]"
+            
+            # Get page title
+            title = soup.title.string if soup.title else ""
+            
+            print(f"[DEBUG Webpage] Loaded {len(text)} chars from {url}")
+            
+            return {
+                "success": True,
+                "url": url,
+                "title": title.strip() if title else "",
+                "content": text,
+                "length": len(text)
+            }
+            
+        except requests.exceptions.Timeout:
+            return {
+                "success": False,
+                "error": f"Timeout lors du chargement de {url}"
+            }
+        except requests.exceptions.RequestException as e:
+            return {
+                "success": False,
+                "error": f"Erreur lors du chargement: {str(e)}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Erreur: {str(e)}"
+            }
+    
     def send_whatsapp_message(self, contact_name: str, message: str) -> Dict[str, Any]:
         """
         Send a WhatsApp message via Twilio.
@@ -1137,7 +1233,7 @@ TOOL_FUNCTIONS = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Rechercher des informations sur le web",
+            "description": "Rechercher des informations sur le web. Retourne une liste de résultats avec titre, lien et extrait. Pour obtenir plus de détails sur un résultat, utiliser load_webpage avec l'URL.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1147,6 +1243,23 @@ TOOL_FUNCTIONS = [
                     }
                 },
                 "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_webpage",
+            "description": "Charger et lire le contenu d'une page web. Utiliser après search_web pour obtenir plus de détails sur un résultat, ou directement si l'URL est connue. Utile pour trouver des informations spécifiques comme numéros de téléphone, horaires, avis, disponibilités, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL complète de la page à charger (ex: 'https://example.com/page')"
+                    }
+                },
+                "required": ["url"]
             }
         }
     },
