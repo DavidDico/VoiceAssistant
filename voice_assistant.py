@@ -1044,6 +1044,104 @@ class VoiceAssistant:
             import traceback
             traceback.print_exc()
     
+    def execute_background_task(self, task: str, speak_result: bool = False):
+        """
+        Execute a scheduled task in the background.
+        Sends the task to GPT which can call functions, then optionally speaks the result.
+        
+        Args:
+            task: Description of the task to execute
+            speak_result: If True, speak the result; if False, execute silently
+        """
+        print(f"🤖 [Background Task] Exécution: {task}")
+        
+        try:
+            # Create a simple prompt for the task
+            task_prompt = f"Exécute cette tâche: {task}"
+            
+            # Build messages for GPT
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": task_prompt}
+            ]
+            
+            # Loop until GPT gives a final response without tool calls
+            max_iterations = 10
+            iteration = 0
+            final_response = None
+            
+            while iteration < max_iterations:
+                iteration += 1
+                
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    tools=EXTENDED_TOOL_FUNCTIONS,
+                    tool_choice="auto",
+                    max_tokens=300,
+                    temperature=0.7
+                )
+                
+                response_message = response.choices[0].message
+                
+                # If no tool calls, we have our final response
+                if not response_message.tool_calls:
+                    final_response = response_message.content
+                    break
+                
+                # Add assistant message with tool calls to messages
+                messages.append({
+                    "role": "assistant",
+                    "content": response_message.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        }
+                        for tc in response_message.tool_calls
+                    ]
+                })
+                
+                # Execute each tool and add results
+                for tool_call in response_message.tool_calls:
+                    function_name = tool_call.function.name
+                    function_args = json.loads(tool_call.function.arguments)
+                    
+                    print(f"   🔧 [Background] {function_name}({function_args})")
+                    
+                    # Execute tool (but not conversation control functions)
+                    if function_name in ["end_conversation", "enable_boost_mode", "disable_boost_mode"]:
+                        function_result = {"success": True, "message": "Ignoré en mode background"}
+                    else:
+                        function_result = self._execute_tool(function_name, function_args)
+                    
+                    # Add tool result to messages
+                    messages.append({
+                        "role": "tool",
+                        "content": json.dumps(function_result, ensure_ascii=False),
+                        "tool_call_id": tool_call.id
+                    })
+            
+            if final_response:
+                print(f"   ✅ [Background] Résultat: {final_response}")
+                
+                if speak_result:
+                    # Wait if assistant is currently speaking
+                    while self._is_speaking:
+                        time.sleep(0.1)
+                    self.speak(final_response)
+            else:
+                print(f"   ⚠️ [Background] Pas de réponse finale après {max_iterations} itérations")
+                
+        except Exception as e:
+            print(f"   ❌ [Background] Erreur: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def _process_streaming_response(self, stream):
         """
         Process a streaming response from GPT.
@@ -1269,6 +1367,14 @@ class VoiceAssistant:
                 return self.tools.get_memories()
             elif function_name == "save_memories":
                 return self.tools.save_memories(**function_args)
+            elif function_name == "schedule_task":
+                return self.tools.schedule_task(**function_args)
+            elif function_name == "schedule_task_delay":
+                return self.tools.schedule_task_delay(**function_args)
+            elif function_name == "list_scheduled":
+                return self.tools.list_scheduled()
+            elif function_name == "cancel_scheduled":
+                return self.tools.cancel_scheduled(**function_args)
             else:
                 return {"success": False, "error": f"Fonction inconnue: {function_name}"}
         except Exception as e:

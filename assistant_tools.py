@@ -2,6 +2,7 @@ import datetime
 import requests
 import json
 import os
+import threading
 from typing import Dict, Any, Optional
 
 class AssistantTools:
@@ -46,6 +47,38 @@ class AssistantTools:
         self.email_address = email_address
         self.email_password = email_password
         self.email_contacts = email_contacts or {}
+        
+        # Registry of scheduled items (timers, alarms, tasks)
+        self._scheduled_items = {}  # id -> {type, label, trigger_time, thread, cancelled}
+        self._next_scheduled_id = 1
+        self._scheduled_lock = threading.Lock()
+    
+    def _register_scheduled_item(self, item_type: str, label: str, trigger_time: datetime.datetime, thread: threading.Thread) -> int:
+        """Register a scheduled item and return its ID."""
+        with self._scheduled_lock:
+            item_id = self._next_scheduled_id
+            self._next_scheduled_id += 1
+            self._scheduled_items[item_id] = {
+                "type": item_type,
+                "label": label,
+                "trigger_time": trigger_time,
+                "thread": thread,
+                "cancelled": False
+            }
+            return item_id
+    
+    def _unregister_scheduled_item(self, item_id: int):
+        """Remove a scheduled item from registry."""
+        with self._scheduled_lock:
+            if item_id in self._scheduled_items:
+                del self._scheduled_items[item_id]
+    
+    def _is_cancelled(self, item_id: int) -> bool:
+        """Check if a scheduled item has been cancelled."""
+        with self._scheduled_lock:
+            if item_id in self._scheduled_items:
+                return self._scheduled_items[item_id]["cancelled"]
+            return True  # If not found, treat as cancelled
         
     def _get_calendar_service(self):
         """Get or create the Google Calendar service."""
@@ -422,15 +455,26 @@ class AssistantTools:
         Returns:
             Dictionary with timer information
         """
-        import threading
         import time
+        import pytz
+        
+        tz = pytz.timezone('Europe/Paris')
+        trigger_time = datetime.datetime.now(tz) + datetime.timedelta(seconds=seconds)
+        
+        # We need to create the thread first, then register, then start
+        item_id_holder = [None]
         
         def timer_thread():
             """Background thread that waits and then announces timer completion."""
             time.sleep(seconds)
             
+            # Check if cancelled
+            if self._is_cancelled(item_id_holder[0]):
+                self._unregister_scheduled_item(item_id_holder[0])
+                return
+            
             # Wait if assistant is currently speaking
-            while hasattr(self, '_is_speaking') and self._is_speaking:
+            while hasattr(self, 'assistant') and self.assistant._is_speaking:
                 time.sleep(0.1)
             
             # Use assistant's audio lock to play alarm
@@ -465,14 +509,20 @@ class AssistantTools:
             # Store reference to parent assistant for speaking
             if hasattr(self, 'assistant'):
                 self.assistant.speak(message)
+            
+            # Unregister after completion
+            self._unregister_scheduled_item(item_id_holder[0])
         
         # Start timer in background thread
         thread = threading.Thread(target=timer_thread, daemon=True)
+        item_id = self._register_scheduled_item("timer", label or f"Timer {seconds}s", trigger_time, thread)
+        item_id_holder[0] = item_id
         thread.start()
         
         return {
             "success": True,
-            "message": f"Timer de {seconds} secondes défini{' pour ' + label if label else ''}",
+            "message": f"Timer de {seconds} secondes défini{' pour ' + label if label else ''} (ID: {item_id})",
+            "id": item_id,
             "seconds": seconds,
             "label": label
         }
@@ -545,7 +595,6 @@ class AssistantTools:
         Returns:
             Dictionary with alarm information
         """
-        import threading
         import time
         import pytz
         
@@ -597,12 +646,20 @@ class AssistantTools:
             
             time_display = f"{hour:02d}:{minute:02d}"
             
+            # We need to create the thread first, then register, then start
+            item_id_holder = [None]
+            
             def alarm_thread():
                 """Background thread that waits and then announces alarm."""
                 time.sleep(seconds_until_alarm)
                 
+                # Check if cancelled
+                if self._is_cancelled(item_id_holder[0]):
+                    self._unregister_scheduled_item(item_id_holder[0])
+                    return
+                
                 # Wait if assistant is currently speaking
-                while hasattr(self, '_is_speaking') and self._is_speaking:
+                while hasattr(self, 'assistant') and self.assistant._is_speaking:
                     time.sleep(0.1)
                 
                 # Use assistant's audio lock to play alarm
@@ -621,20 +678,26 @@ class AssistantTools:
                 # Store reference to parent assistant for speaking
                 if hasattr(self, 'assistant'):
                     self.assistant.speak(message)
+                
+                # Unregister after completion
+                self._unregister_scheduled_item(item_id_holder[0])
             
             # Start alarm in background thread
             thread = threading.Thread(target=alarm_thread, daemon=True)
+            item_id = self._register_scheduled_item("alarme", label or f"Alarme {time_display}", alarm_datetime, thread)
+            item_id_holder[0] = item_id
             thread.start()
             
             # Build confirmation message
             if label:
-                confirm_msg = f"Alarme définie pour {date_display} à {time_display}: {label}"
+                confirm_msg = f"Alarme définie pour {date_display} à {time_display}: {label} (ID: {item_id})"
             else:
-                confirm_msg = f"Alarme définie pour {date_display} à {time_display}"
+                confirm_msg = f"Alarme définie pour {date_display} à {time_display} (ID: {item_id})"
             
             return {
                 "success": True,
                 "message": confirm_msg,
+                "id": item_id,
                 "time": time_display,
                 "date": date_display,
                 "label": label,
@@ -643,6 +706,284 @@ class AssistantTools:
             
         except Exception as e:
             return {"success": False, "error": f"Erreur: {str(e)}"}
+    
+    def schedule_task(self, task: str, time_str: str, date_str: str = None, speak_result: bool = False) -> Dict[str, Any]:
+        """
+        Schedule a task to be executed at a specific time.
+        The task will be processed by GPT which can call functions like send_email, get_weather, etc.
+        
+        Args:
+            task: Description of the task to execute (e.g., "Envoie un email à moi avec la météo du jour")
+            time_str: Time in HH:MM format (24-hour)
+            date_str: Optional date - "today", "tomorrow", "après-demain", or YYYY-MM-DD format
+            speak_result: If True, speak the result of the task; if False, execute silently
+            
+        Returns:
+            Dictionary with task information
+        """
+        import time
+        import pytz
+        
+        try:
+            tz = pytz.timezone('Europe/Paris')
+            now = datetime.datetime.now(tz)
+            
+            # Parse time
+            try:
+                hour, minute = map(int, time_str.split(':'))
+            except:
+                return {"success": False, "error": f"Format d'heure invalide: {time_str}. Utilisez HH:MM"}
+            
+            # Parse date
+            if date_str is None or date_str.lower() in ["today", "aujourd'hui"]:
+                task_date = now.date()
+            elif date_str.lower() in ["tomorrow", "demain"]:
+                task_date = (now + datetime.timedelta(days=1)).date()
+            elif date_str.lower() in ["après-demain", "apres-demain", "après demain", "apres demain"]:
+                task_date = (now + datetime.timedelta(days=2)).date()
+            else:
+                try:
+                    task_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                except:
+                    return {"success": False, "error": f"Format de date invalide: {date_str}. Utilisez YYYY-MM-DD"}
+            
+            # Create target datetime
+            task_time = datetime.time(hour, minute)
+            task_datetime = tz.localize(datetime.datetime.combine(task_date, task_time))
+            
+            # If time is in the past for today, move to tomorrow
+            if task_datetime <= now and date_str is None:
+                task_date = (now + datetime.timedelta(days=1)).date()
+                task_datetime = tz.localize(datetime.datetime.combine(task_date, task_time))
+            
+            # Calculate seconds until task
+            seconds_until_task = (task_datetime - now).total_seconds()
+            
+            if seconds_until_task <= 0:
+                return {"success": False, "error": "L'heure de la tâche est déjà passée"}
+            
+            # Format for display
+            if task_date == now.date():
+                date_display = "aujourd'hui"
+            elif task_date == (now + datetime.timedelta(days=1)).date():
+                date_display = "demain"
+            else:
+                date_display = task_date.strftime("%A %d %B")
+            
+            time_display = f"{hour:02d}:{minute:02d}"
+            
+            # We need to create the thread first, then register, then start
+            item_id_holder = [None]
+            
+            def task_thread():
+                """Background thread that waits and then executes the task."""
+                time.sleep(seconds_until_task)
+                
+                # Check if cancelled
+                if self._is_cancelled(item_id_holder[0]):
+                    self._unregister_scheduled_item(item_id_holder[0])
+                    return
+                
+                print(f"🤖 [Tâche planifiée] Exécution: {task}")
+                
+                # Execute the task through GPT
+                if hasattr(self, 'assistant'):
+                    try:
+                        self.assistant.execute_background_task(task, speak_result=speak_result)
+                    except Exception as e:
+                        print(f"❌ [Tâche planifiée] Erreur: {e}")
+                else:
+                    print(f"❌ [Tâche planifiée] Pas d'assistant disponible")
+                
+                # Unregister after completion
+                self._unregister_scheduled_item(item_id_holder[0])
+            
+            # Start task in background thread
+            thread = threading.Thread(target=task_thread, daemon=True)
+            item_id = self._register_scheduled_item("tâche", task[:50], task_datetime, thread)
+            item_id_holder[0] = item_id
+            thread.start()
+            
+            # Build confirmation message
+            confirm_msg = f"Tâche planifiée pour {date_display} à {time_display}: {task} (ID: {item_id})"
+            
+            return {
+                "success": True,
+                "message": confirm_msg,
+                "id": item_id,
+                "time": time_display,
+                "date": date_display,
+                "task": task,
+                "speak_result": speak_result
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": f"Erreur: {str(e)}"}
+    
+    def schedule_task_delay(self, task: str, seconds: int, speak_result: bool = False) -> Dict[str, Any]:
+        """
+        Schedule a task to be executed after a delay.
+        The task will be processed by GPT which can call functions like send_email, get_weather, etc.
+        
+        Args:
+            task: Description of the task to execute (e.g., "Envoie un email à moi avec la météo du jour")
+            seconds: Number of seconds to wait before executing
+            speak_result: If True, speak the result of the task; if False, execute silently
+            
+        Returns:
+            Dictionary with task information
+        """
+        import time
+        import pytz
+        
+        tz = pytz.timezone('Europe/Paris')
+        trigger_time = datetime.datetime.now(tz) + datetime.timedelta(seconds=seconds)
+        
+        # Format delay for display
+        if seconds >= 3600:
+            hours = seconds // 3600
+            mins = (seconds % 3600) // 60
+            delay_display = f"{hours}h{mins:02d}" if mins else f"{hours}h"
+        elif seconds >= 60:
+            mins = seconds // 60
+            secs = seconds % 60
+            delay_display = f"{mins}min{secs:02d}" if secs else f"{mins}min"
+        else:
+            delay_display = f"{seconds}s"
+        
+        # We need to create the thread first, then register, then start
+        item_id_holder = [None]
+        
+        def task_thread():
+            """Background thread that waits and then executes the task."""
+            time.sleep(seconds)
+            
+            # Check if cancelled
+            if self._is_cancelled(item_id_holder[0]):
+                self._unregister_scheduled_item(item_id_holder[0])
+                return
+            
+            print(f"🤖 [Tâche planifiée] Exécution: {task}")
+            
+            # Execute the task through GPT
+            if hasattr(self, 'assistant'):
+                try:
+                    self.assistant.execute_background_task(task, speak_result=speak_result)
+                except Exception as e:
+                    print(f"❌ [Tâche planifiée] Erreur: {e}")
+            else:
+                print(f"❌ [Tâche planifiée] Pas d'assistant disponible")
+            
+            # Unregister after completion
+            self._unregister_scheduled_item(item_id_holder[0])
+        
+        # Start task in background thread
+        thread = threading.Thread(target=task_thread, daemon=True)
+        item_id = self._register_scheduled_item("tâche", task[:50], trigger_time, thread)
+        item_id_holder[0] = item_id
+        thread.start()
+        
+        # Build confirmation message
+        confirm_msg = f"Tâche planifiée dans {delay_display}: {task} (ID: {item_id})"
+        
+        return {
+            "success": True,
+            "message": confirm_msg,
+            "id": item_id,
+            "delay": delay_display,
+            "seconds": seconds,
+            "task": task,
+            "speak_result": speak_result
+        }
+    
+    def list_scheduled(self) -> Dict[str, Any]:
+        """
+        List all pending scheduled items (timers, alarms, tasks).
+        
+        Returns:
+            Dictionary with list of scheduled items
+        """
+        import pytz
+        
+        tz = pytz.timezone('Europe/Paris')
+        now = datetime.datetime.now(tz)
+        
+        with self._scheduled_lock:
+            items = []
+            for item_id, item in self._scheduled_items.items():
+                if not item["cancelled"]:
+                    # Calculate time remaining
+                    if item["trigger_time"].tzinfo is None:
+                        trigger_time = tz.localize(item["trigger_time"])
+                    else:
+                        trigger_time = item["trigger_time"]
+                    
+                    remaining = trigger_time - now
+                    remaining_seconds = max(0, remaining.total_seconds())
+                    
+                    if remaining_seconds > 3600:
+                        remaining_str = f"{int(remaining_seconds // 3600)}h {int((remaining_seconds % 3600) // 60)}min"
+                    elif remaining_seconds > 60:
+                        remaining_str = f"{int(remaining_seconds // 60)}min"
+                    else:
+                        remaining_str = f"{int(remaining_seconds)}s"
+                    
+                    items.append({
+                        "id": item_id,
+                        "type": item["type"],
+                        "label": item["label"],
+                        "trigger_time": trigger_time.strftime("%H:%M"),
+                        "remaining": remaining_str
+                    })
+            
+            # Sort by trigger time
+            items.sort(key=lambda x: x["id"])
+            
+            return {
+                "success": True,
+                "count": len(items),
+                "items": items
+            }
+    
+    def cancel_scheduled(self, item_id: int = None, search_term: str = None) -> Dict[str, Any]:
+        """
+        Cancel a scheduled item by ID or by searching its label.
+        
+        Args:
+            item_id: ID of the item to cancel
+            search_term: Search term to find item by label (cancels first match)
+            
+        Returns:
+            Dictionary with cancellation status
+        """
+        with self._scheduled_lock:
+            if item_id is not None:
+                if item_id in self._scheduled_items:
+                    item = self._scheduled_items[item_id]
+                    if not item["cancelled"]:
+                        item["cancelled"] = True
+                        return {
+                            "success": True,
+                            "message": f"{item['type'].capitalize()} '{item['label']}' (ID: {item_id}) annulé"
+                        }
+                    else:
+                        return {"success": False, "error": f"L'élément {item_id} est déjà annulé"}
+                else:
+                    return {"success": False, "error": f"Aucun élément trouvé avec l'ID {item_id}"}
+            
+            elif search_term is not None:
+                search_lower = search_term.lower()
+                for iid, item in self._scheduled_items.items():
+                    if not item["cancelled"] and search_lower in item["label"].lower():
+                        item["cancelled"] = True
+                        return {
+                            "success": True,
+                            "message": f"{item['type'].capitalize()} '{item['label']}' (ID: {iid}) annulé"
+                        }
+                return {"success": False, "error": f"Aucun élément trouvé contenant '{search_term}'"}
+            
+            else:
+                return {"success": False, "error": "Spécifiez un ID ou un terme de recherche"}
     
     def search_web(self, query: str) -> Dict[str, Any]:
         """
@@ -1379,6 +1720,93 @@ TOOL_FUNCTIONS = [
                     }
                 },
                 "required": ["time_str"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_task",
+            "description": "Planifier une tâche à exécuter à une heure précise. La tâche sera exécutée automatiquement en arrière-plan. Utiliser pour des demandes comme 'envoie-moi la météo par mail à 7h', 'rappelle-moi d'aller au travail par SMS à 8h'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Description de la tâche à exécuter (ex: 'Envoie un email à moi avec la météo du jour', 'Envoie un SMS à moi pour rappeler d'aller au travail')"
+                    },
+                    "time_str": {
+                        "type": "string",
+                        "description": "Heure d'exécution au format HH:MM (24h). Ex: '07:00', '18:30'"
+                    },
+                    "date_str": {
+                        "type": "string",
+                        "description": "Date optionnelle: 'aujourd'hui', 'demain', 'après-demain', ou format YYYY-MM-DD"
+                    },
+                    "speak_result": {
+                        "type": "boolean",
+                        "description": "Si true, le résultat sera prononcé à voix haute. Si false (défaut), la tâche s'exécute silencieusement."
+                    }
+                },
+                "required": ["task", "time_str"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_task_delay",
+            "description": "Planifier une tâche à exécuter après un délai. Utiliser pour des demandes comme 'envoie-moi la météo par SMS dans 30 secondes', 'dans 5 minutes dis-moi les news'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Description de la tâche à exécuter (ex: 'Envoie un SMS à moi avec la météo', 'Dis-moi les actualités')"
+                    },
+                    "seconds": {
+                        "type": "integer",
+                        "description": "Nombre de secondes avant d'exécuter la tâche (ex: pour '2 minutes', utiliser 120)"
+                    },
+                    "speak_result": {
+                        "type": "boolean",
+                        "description": "Si true, le résultat sera prononcé à voix haute. Si false (défaut), la tâche s'exécute silencieusement."
+                    }
+                },
+                "required": ["task", "seconds"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_scheduled",
+            "description": "Lister tous les éléments programmés en attente: timers, alarmes et tâches planifiées.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_scheduled",
+            "description": "Annuler un timer, une alarme ou une tâche planifiée. Peut annuler par ID ou par recherche dans le label.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_id": {
+                        "type": "integer",
+                        "description": "ID de l'élément à annuler"
+                    },
+                    "search_term": {
+                        "type": "string",
+                        "description": "Terme de recherche pour trouver l'élément par son label (annule le premier résultat)"
+                    }
+                },
+                "required": []
             }
         }
     },
