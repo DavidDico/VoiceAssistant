@@ -39,7 +39,6 @@ FILLER_PHRASES = [
     "Euh...",
     "Une seconde...",
     "Je regarde...",
-    "Attends...",
 ]
 # =============================================================================
 
@@ -92,7 +91,7 @@ NO_FILLER_FUNCTIONS = {
 
 
 class VoiceAssistant:
-    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None):
+    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None, email_smtp_server=None, email_smtp_port=None, email_address=None, email_password=None, email_contacts=None):
         """
         Initialize the voice assistant.
         
@@ -107,10 +106,8 @@ class VoiceAssistant:
             porcupine_model_path: Path to Porcupine language model .pv file (optional, for non-English wake words)
             google_search_api_key: Google Custom Search API key (optional, for web search)
             google_search_engine_id: Google Custom Search Engine ID (optional, for web search)
-            twilio_account_sid: Twilio Account SID (optional, for WhatsApp & SMS)
-            twilio_auth_token: Twilio Auth Token (optional, for WhatsApp & SMS)
-            twilio_whatsapp_from: Twilio WhatsApp number (optional, for WhatsApp)
-            whatsapp_contacts: Dictionary of contact names to WhatsApp numbers (optional)
+            twilio_account_sid: Twilio Account SID (optional, for SMS)
+            twilio_auth_token: Twilio Auth Token (optional, for SMS)
             twilio_sms_from: Twilio phone number for SMS (optional, for SMS)
             sms_contacts: Dictionary of contact names to phone numbers (optional)
             rss_feeds: Dictionary of category names to RSS URLs (optional, for news)
@@ -122,6 +119,11 @@ class VoiceAssistant:
             history_max_age_seconds: Maximum age of history items in seconds (default 3600 = 1 hour)
             memory_file_path: Path to memory file (optional, defaults to ~/.casimir_memory.txt)
             default_city: Default city for weather queries (optional, e.g., "Paris")
+            email_smtp_server: SMTP server address (optional, e.g., 'smtp.gmail.com')
+            email_smtp_port: SMTP server port (optional, e.g., 587)
+            email_address: Email address to send from (optional)
+            email_password: Email password or app password (optional)
+            email_contacts: Dictionary of contact names to email addresses (optional)
         """
         self.porcupine_access_key = porcupine_access_key
         self.openai_client = OpenAI(api_key=openai_api_key)
@@ -133,14 +135,17 @@ class VoiceAssistant:
             google_search_engine_id=google_search_engine_id,
             twilio_account_sid=twilio_account_sid,
             twilio_auth_token=twilio_auth_token,
-            twilio_whatsapp_from=twilio_whatsapp_from,
-            whatsapp_contacts=whatsapp_contacts,
             twilio_sms_from=twilio_sms_from,
             sms_contacts=sms_contacts,
             rss_feeds=rss_feeds,
             google_calendar_credentials_path=google_calendar_credentials_path,
             google_calendar_id=google_calendar_id,
-            memory_file_path=memory_file_path
+            memory_file_path=memory_file_path,
+            email_smtp_server=email_smtp_server,
+            email_smtp_port=email_smtp_port,
+            email_address=email_address,
+            email_password=email_password,
+            email_contacts=email_contacts
         )
         self.tools.assistant = self  # Give tools access to assistant for timer announcements
         
@@ -204,7 +209,7 @@ class VoiceAssistant:
         wake_word_name = self.wake_word if not self.custom_wake_word_path else os.path.basename(self.custom_wake_word_path).replace('.ppn', '').replace('_', ' ')
         
         # Get the first contact names for "moi" references
-        first_whatsapp_contact = list(whatsapp_contacts.keys())[0] if whatsapp_contacts else None
+        first_email_contact = list(email_contacts.keys())[0] if email_contacts else None
         first_sms_contact = list(sms_contacts.keys())[0] if sms_contacts else None
         
         self.system_prompt = f"""Tu es un assistant vocal utile appelé "{wake_word_name}". Réponds toujours en français. 
@@ -222,13 +227,13 @@ class VoiceAssistant:
         ACTUALITÉS: Quand tu reçois des actualités, sélectionne les 2-3 plus importantes ou intéressantes et résume-les 
         de façon concise (environ 3 phrases au total). Ne liste pas tous les articles.
         
-        MESSAGES SMS ET WHATSAPP:
-        Quand l'utilisateur dit "envoie-moi un SMS", "envoie-moi un message", "envoie-moi un WhatsApp" ou utilise 
+        MESSAGES EMAIL ET SMS:
+        Quand l'utilisateur dit "envoie-moi un email", "envoie-moi un mail", "envoie-moi un message", "envoie-moi un SMS" ou utilise 
         "moi/me" comme destinataire:
         1. Si l'utilisateur s'est identifié dans la conversation (ex: "Je suis David", "C'est Marie", "Moi c'est Pierre"),
            utilise ce nom comme contact pour l'envoi.
         2. Sinon, par défaut:
-           - Pour WhatsApp: utilise "{first_whatsapp_contact}" comme nom de contact
+           - Pour Email: utilise "{first_email_contact}" comme nom de contact
            - Pour SMS: utilise "{first_sms_contact}" comme nom de contact
         
         GESTION DE LA CONVERSATION:
@@ -1210,8 +1215,8 @@ class VoiceAssistant:
                 return self.tools.search_web(**function_args)
             elif function_name == "load_webpage":
                 return self.tools.load_webpage(**function_args)
-            elif function_name == "send_whatsapp_message":
-                return self.tools.send_whatsapp_message(**function_args)
+            elif function_name == "send_email":
+                return self.tools.send_email(**function_args)
             elif function_name == "send_sms":
                 return self.tools.send_sms(**function_args)
             elif function_name == "get_news":
@@ -1467,12 +1472,36 @@ if __name__ == "__main__":
         GOOGLE_SEARCH_ENGINE_ID,
         TWILIO_ACCOUNT_SID,
         TWILIO_AUTH_TOKEN,
-        TWILIO_WHATSAPP_FROM,
-        WHATSAPP_CONTACTS,
         TWILIO_SMS_FROM,
         SMS_CONTACTS,
         RSS_FEEDS
     )
+    
+    # Optional email configuration
+    try:
+        from config import EMAIL_SMTP_SERVER
+    except ImportError:
+        EMAIL_SMTP_SERVER = None
+    
+    try:
+        from config import EMAIL_SMTP_PORT
+    except ImportError:
+        EMAIL_SMTP_PORT = 587
+    
+    try:
+        from config import EMAIL_ADDRESS
+    except ImportError:
+        EMAIL_ADDRESS = None
+    
+    try:
+        from config import EMAIL_PASSWORD
+    except ImportError:
+        EMAIL_PASSWORD = None
+    
+    try:
+        from config import EMAIL_CONTACTS
+    except ImportError:
+        EMAIL_CONTACTS = {}
     
     # Optional imports
     try:
@@ -1535,8 +1564,6 @@ if __name__ == "__main__":
         google_search_engine_id=GOOGLE_SEARCH_ENGINE_ID,
         twilio_account_sid=TWILIO_ACCOUNT_SID,
         twilio_auth_token=TWILIO_AUTH_TOKEN,
-        twilio_whatsapp_from=TWILIO_WHATSAPP_FROM,
-        whatsapp_contacts=WHATSAPP_CONTACTS,
         twilio_sms_from=TWILIO_SMS_FROM,
         sms_contacts=SMS_CONTACTS,
         rss_feeds=RSS_FEEDS,
@@ -1547,7 +1574,12 @@ if __name__ == "__main__":
         max_history_items=MAX_HISTORY_ITEMS,
         history_max_age_seconds=HISTORY_MAX_AGE_SECONDS,
         memory_file_path=MEMORY_FILE_PATH,
-        default_city=DEFAULT_CITY
+        default_city=DEFAULT_CITY,
+        email_smtp_server=EMAIL_SMTP_SERVER,
+        email_smtp_port=EMAIL_SMTP_PORT,
+        email_address=EMAIL_ADDRESS,
+        email_password=EMAIL_PASSWORD,
+        email_contacts=EMAIL_CONTACTS
     )
     
     assistant.run()

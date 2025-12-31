@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 class AssistantTools:
     """Tools/functions that the assistant can use to fetch real-time information."""
     
-    def __init__(self, openweather_api_key=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_whatsapp_from=None, whatsapp_contacts=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, google_calendar_credentials_path=None, google_calendar_id=None, memory_file_path=None):
+    def __init__(self, openweather_api_key=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, google_calendar_credentials_path=None, google_calendar_id=None, memory_file_path=None, email_smtp_server=None, email_smtp_port=None, email_address=None, email_password=None, email_contacts=None):
         """
         Initialize tools with necessary API keys.
         
@@ -17,22 +17,23 @@ class AssistantTools:
             google_search_engine_id: Search Engine ID for Google Custom Search (optional)
             twilio_account_sid: Twilio Account SID (optional)
             twilio_auth_token: Twilio Auth Token (optional)
-            twilio_whatsapp_from: Twilio WhatsApp number (optional)
-            whatsapp_contacts: Dictionary of contact names to WhatsApp numbers (optional)
             twilio_sms_from: Twilio phone number for SMS (optional)
             sms_contacts: Dictionary of contact names to phone numbers (optional)
             rss_feeds: Dictionary of category names to RSS feed URLs (optional)
             google_calendar_credentials_path: Path to Google OAuth credentials JSON file (optional)
             google_calendar_id: Google Calendar ID to use (optional, defaults to 'primary')
             memory_file_path: Path to memory file (optional, defaults to ~/.casimir_memory.txt)
+            email_smtp_server: SMTP server address (optional, e.g., 'smtp.gmail.com')
+            email_smtp_port: SMTP server port (optional, e.g., 587)
+            email_address: Email address to send from (optional)
+            email_password: Email password or app password (optional)
+            email_contacts: Dictionary of contact names to email addresses (optional)
         """
         self.openweather_api_key = openweather_api_key
         self.google_search_api_key = google_search_api_key
         self.google_search_engine_id = google_search_engine_id
         self.twilio_account_sid = twilio_account_sid
         self.twilio_auth_token = twilio_auth_token
-        self.twilio_whatsapp_from = twilio_whatsapp_from
-        self.whatsapp_contacts = whatsapp_contacts or {}
         self.twilio_sms_from = twilio_sms_from
         self.sms_contacts = sms_contacts or {}
         self.rss_feeds = rss_feeds or {}
@@ -40,6 +41,11 @@ class AssistantTools:
         self.google_calendar_id = google_calendar_id or 'primary'
         self._calendar_service = None
         self.memory_file_path = memory_file_path or os.path.expanduser("~/.casimir_memory.txt")
+        self.email_smtp_server = email_smtp_server
+        self.email_smtp_port = email_smtp_port
+        self.email_address = email_address
+        self.email_password = email_password
+        self.email_contacts = email_contacts or {}
         
     def _get_calendar_service(self):
         """Get or create the Google Calendar service."""
@@ -680,81 +686,92 @@ class AssistantTools:
                 "error": f"Erreur: {str(e)}"
             }
     
-    def send_whatsapp_message(self, contact_name: str, message: str) -> Dict[str, Any]:
+    def send_email(self, contact_name: str, subject: str, message: str) -> Dict[str, Any]:
         """
-        Send a WhatsApp message via Twilio.
+        Send an email via SMTP.
         
         Args:
-            contact_name: Name of the contact (must be in WHATSAPP_CONTACTS)
-            message: Message to send
+            contact_name: Name of the contact (must be in EMAIL_CONTACTS)
+            subject: Email subject
+            message: Email body
             
         Returns:
             Dictionary with send status
         """
-        print(f"[DEBUG WhatsApp] Tentative d'envoi à '{contact_name}': {message}")
+        print(f"[DEBUG Email] Tentative d'envoi à '{contact_name}': {subject}")
         
-        if not self.twilio_account_sid or not self.twilio_auth_token:
-            error_msg = "Twilio non configuré. Ajoutez TWILIO_ACCOUNT_SID et TWILIO_AUTH_TOKEN dans config.py"
-            print(f"[DEBUG WhatsApp] ERREUR: {error_msg}")
+        if not self.email_smtp_server or not self.email_address or not self.email_password:
+            error_msg = "Email non configuré. Ajoutez EMAIL_SMTP_SERVER, EMAIL_ADDRESS et EMAIL_PASSWORD dans config.py"
+            print(f"[DEBUG Email] ERREUR: {error_msg}")
             return {
                 "success": False,
                 "error": error_msg
             }
         
-        print(f"[DEBUG WhatsApp] Credentials OK")
+        print(f"[DEBUG Email] Configuration OK")
         
         # Normalize contact name (lowercase, strip spaces)
-        contact_name = contact_name.lower().strip()
-        print(f"[DEBUG WhatsApp] Contact normalisé: '{contact_name}'")
-        print(f"[DEBUG WhatsApp] Contacts disponibles: {list(self.whatsapp_contacts.keys())}")
+        contact_name_normalized = contact_name.lower().strip()
+        print(f"[DEBUG Email] Contact normalisé: '{contact_name_normalized}'")
+        print(f"[DEBUG Email] Contacts disponibles: {list(self.email_contacts.keys())}")
         
         # Check if contact exists
-        if contact_name not in self.whatsapp_contacts:
-            available = ", ".join(self.whatsapp_contacts.keys())
+        if contact_name_normalized not in self.email_contacts:
+            available = ", ".join(self.email_contacts.keys())
             error_msg = f"Contact '{contact_name}' non trouvé. Contacts disponibles: {available}"
-            print(f"[DEBUG WhatsApp] ERREUR: {error_msg}")
+            print(f"[DEBUG Email] ERREUR: {error_msg}")
             return {
                 "success": False,
                 "error": error_msg
             }
         
-        to_number = self.whatsapp_contacts[contact_name]
-        print(f"[DEBUG WhatsApp] Numéro de destination: {to_number}")
-        print(f"[DEBUG WhatsApp] Numéro d'envoi: {self.twilio_whatsapp_from}")
+        to_email = self.email_contacts[contact_name_normalized]
+        print(f"[DEBUG Email] Adresse de destination: {to_email}")
         
         try:
-            from twilio.rest import Client
+            import smtplib
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
             
-            print(f"[DEBUG WhatsApp] Initialisation client Twilio...")
-            client = Client(self.twilio_account_sid, self.twilio_auth_token)
+            print(f"[DEBUG Email] Création du message...")
             
-            print(f"[DEBUG WhatsApp] Envoi du message...")
-            twilio_message = client.messages.create(
-                body=message,
-                from_=self.twilio_whatsapp_from,
-                to=to_number
-            )
+            # Create message
+            msg = MIMEMultipart()
+            msg['From'] = self.email_address
+            msg['To'] = to_email
+            msg['Subject'] = subject
+            msg.attach(MIMEText(message, 'plain', 'utf-8'))
             
-            print(f"[DEBUG WhatsApp] Message envoyé! SID: {twilio_message.sid}, Status: {twilio_message.status}")
+            print(f"[DEBUG Email] Connexion au serveur SMTP {self.email_smtp_server}:{self.email_smtp_port}...")
+            
+            # Connect and send
+            with smtplib.SMTP(self.email_smtp_server, self.email_smtp_port) as server:
+                server.starttls()
+                print(f"[DEBUG Email] Authentification...")
+                server.login(self.email_address, self.email_password)
+                print(f"[DEBUG Email] Envoi...")
+                server.send_message(msg)
+            
+            print(f"[DEBUG Email] Email envoyé avec succès!")
             
             return {
                 "success": True,
                 "contact": contact_name,
-                "message": message,
-                "message_sid": twilio_message.sid,
-                "status": twilio_message.status
+                "to_email": to_email,
+                "subject": subject,
+                "message": message
             }
             
-        except ImportError as e:
-            error_msg = f"Twilio non installé: {e}"
-            print(f"[DEBUG WhatsApp] ERREUR: {error_msg}")
+        except smtplib.SMTPAuthenticationError as e:
+            error_msg = f"Erreur d'authentification SMTP. Vérifiez votre mot de passe d'application: {str(e)}"
+            print(f"[DEBUG Email] ERREUR: {error_msg}")
             return {
                 "success": False,
                 "error": error_msg
             }
         except Exception as e:
             error_msg = f"Erreur lors de l'envoi: {str(e)}"
-            print(f"[DEBUG WhatsApp] ERREUR: {error_msg}")
+            print(f"[DEBUG Email] ERREUR: {error_msg}")
             import traceback
             traceback.print_exc()
             return {
@@ -1266,8 +1283,8 @@ TOOL_FUNCTIONS = [
     {
         "type": "function",
         "function": {
-            "name": "send_whatsapp_message",
-            "description": "Envoyer un message WhatsApp à un contact. Le nom du contact doit correspondre exactement à un contact configuré.",
+            "name": "send_email",
+            "description": "Envoyer un email à un contact. Le nom du contact doit correspondre exactement à un contact configuré.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1275,12 +1292,16 @@ TOOL_FUNCTIONS = [
                         "type": "string",
                         "description": "Nom du contact (ex: 'moi', 'marie', 'papa', 'maman'). Doit être en minuscules."
                     },
+                    "subject": {
+                        "type": "string",
+                        "description": "Sujet de l'email"
+                    },
                     "message": {
                         "type": "string",
-                        "description": "Le message à envoyer"
+                        "description": "Le contenu de l'email"
                     }
                 },
-                "required": ["contact_name", "message"]
+                "required": ["contact_name", "subject", "message"]
             }
         }
     },
