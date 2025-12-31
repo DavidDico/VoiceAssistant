@@ -91,7 +91,7 @@ NO_FILLER_FUNCTIONS = {
 
 
 class VoiceAssistant:
-    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None, email_smtp_server=None, email_smtp_port=None, email_address=None, email_password=None, email_contacts=None):
+    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None, email_smtp_server=None, email_smtp_port=None, email_address=None, email_password=None, email_contacts=None, silence_timeout=1.5, conversation_timeout=10.0):
         """
         Initialize the voice assistant.
         
@@ -124,6 +124,8 @@ class VoiceAssistant:
             email_address: Email address to send from (optional)
             email_password: Email password or app password (optional)
             email_contacts: Dictionary of contact names to email addresses (optional)
+            silence_timeout: Seconds of silence before considering speech ended (default 1.5)
+            conversation_timeout: Seconds of no speech before ending conversation (default 10.0)
         """
         self.porcupine_access_key = porcupine_access_key
         self.openai_client = OpenAI(api_key=openai_api_key)
@@ -252,7 +254,8 @@ class VoiceAssistant:
         Si l'utilisateur mentionne ton nom ("{wake_word_name}") pendant la conversation, c'est normal."""
         
         # Speech recognition settings
-        self.silence_timeout = 1.5  # Seconds of silence before considering speech ended
+        self.silence_timeout = silence_timeout  # Seconds of silence before considering speech ended
+        self.conversation_timeout = conversation_timeout  # Seconds of no speech before ending conversation
         self.last_transcript_time = None
     
     def _get_greeting_filename(self, greeting_text):
@@ -712,8 +715,31 @@ class VoiceAssistant:
         
         # Start audio streaming thread
         self.listening_for_command = True
+        self._got_any_speech = False  # Track if we got any speech
         audio_thread = threading.Thread(target=self._audio_stream_generator, args=(stream,))
         audio_thread.start()
+        
+        # Start conversation timeout checker (only during active conversation)
+        start_time = time.time()
+        timeout_triggered = [False]
+        
+        def conversation_timeout_checker():
+            """Check for conversation timeout when no speech at all."""
+            while self.listening_for_command:
+                if self._conversation_active and not self._got_any_speech:
+                    elapsed = time.time() - start_time
+                    if elapsed > self.conversation_timeout:
+                        print(f"\n   [Pas de réponse - fin de conversation]")
+                        timeout_triggered[0] = True
+                        self.listening_for_command = False
+                        self.audio_queue.put(None)  # Sentinel to stop audio generator
+                        break
+                time.sleep(0.1)
+        
+        timeout_thread = None
+        if self._conversation_active:
+            timeout_thread = threading.Thread(target=conversation_timeout_checker, daemon=True)
+            timeout_thread.start()
         
         # Configure Google Speech recognition
         config = speech.RecognitionConfig(
@@ -749,10 +775,14 @@ class VoiceAssistant:
                 self._conversation_should_end = True
                 
         except Exception as e:
-            print(f"❌ Erreur lors de la reconnaissance vocale: {e}")
+            # Don't print error if it was just a timeout
+            if not timeout_triggered[0]:
+                print(f"❌ Erreur lors de la reconnaissance vocale: {e}")
             self._conversation_should_end = True
         finally:
             self.listening_for_command = False
+            if timeout_thread:
+                timeout_thread.join(timeout=0.5)
             audio_thread.join()
             stream.stop_stream()
             stream.close()
@@ -793,13 +823,18 @@ class VoiceAssistant:
         got_any_speech = [False]
         
         def timeout_checker():
-            """Check for timeout in a separate thread."""
+            """Check for silence timeout after speech has started."""
             while not should_stop[0]:
-                if got_any_speech[0] and time.time() - last_activity_time[0] > self.silence_timeout:
+                current_time = time.time()
+                
+                # If we got speech, check for silence timeout
+                if got_any_speech[0] and current_time - last_activity_time[0] > self.silence_timeout:
                     print(f"\n   [Silence détectée - fin de commande]")
                     self.listening_for_command = False
+                    self.audio_queue.put(None)  # Sentinel to stop audio generator
                     should_stop[0] = True
                     break
+                    
                 time.sleep(0.1)
         
         # Start timeout checker thread
@@ -820,6 +855,7 @@ class VoiceAssistant:
                     continue
                 
                 got_any_speech[0] = True
+                self._got_any_speech = True  # Also set instance variable for conversation timeout
                 last_activity_time[0] = time.time()
                     
                 if not result.is_final:
@@ -1550,6 +1586,16 @@ if __name__ == "__main__":
     except ImportError:
         DEFAULT_CITY = None  # No default city
     
+    try:
+        from config import SILENCE_TIMEOUT
+    except ImportError:
+        SILENCE_TIMEOUT = 1.5  # Default: 1.5 seconds of silence before speech is considered ended
+    
+    try:
+        from config import CONVERSATION_TIMEOUT
+    except ImportError:
+        CONVERSATION_TIMEOUT = 10.0  # Default: 10 seconds of no speech before ending conversation
+    
     # Create and run the assistant
     assistant = VoiceAssistant(
         porcupine_access_key=PORCUPINE_ACCESS_KEY,
@@ -1579,7 +1625,9 @@ if __name__ == "__main__":
         email_smtp_port=EMAIL_SMTP_PORT,
         email_address=EMAIL_ADDRESS,
         email_password=EMAIL_PASSWORD,
-        email_contacts=EMAIL_CONTACTS
+        email_contacts=EMAIL_CONTACTS,
+        silence_timeout=SILENCE_TIMEOUT,
+        conversation_timeout=CONVERSATION_TIMEOUT
     )
     
     assistant.run()
