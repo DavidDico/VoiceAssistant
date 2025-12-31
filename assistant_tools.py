@@ -533,6 +533,117 @@ class AssistantTools:
         except Exception as e:
             print(f"⏰ [Alarm - sound failed: {e}]")
     
+    def set_alarm(self, time_str: str, date_str: str = None, label: str = "") -> Dict[str, Any]:
+        """
+        Set an alarm for a specific time (and optionally date).
+        
+        Args:
+            time_str: Time in HH:MM format (24-hour)
+            date_str: Optional date - "today", "tomorrow", "après-demain", or YYYY-MM-DD format
+            label: Optional label/reminder message for the alarm
+            
+        Returns:
+            Dictionary with alarm information
+        """
+        import threading
+        import time
+        import pytz
+        
+        try:
+            tz = pytz.timezone('Europe/Paris')
+            now = datetime.datetime.now(tz)
+            
+            # Parse time
+            try:
+                hour, minute = map(int, time_str.split(':'))
+            except:
+                return {"success": False, "error": f"Format d'heure invalide: {time_str}. Utilisez HH:MM"}
+            
+            # Parse date
+            if date_str is None or date_str.lower() in ["today", "aujourd'hui"]:
+                alarm_date = now.date()
+            elif date_str.lower() in ["tomorrow", "demain"]:
+                alarm_date = (now + datetime.timedelta(days=1)).date()
+            elif date_str.lower() in ["après-demain", "apres-demain", "après demain", "apres demain"]:
+                alarm_date = (now + datetime.timedelta(days=2)).date()
+            else:
+                try:
+                    alarm_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                except:
+                    return {"success": False, "error": f"Format de date invalide: {date_str}. Utilisez YYYY-MM-DD"}
+            
+            # Create target datetime
+            alarm_time = datetime.time(hour, minute)
+            alarm_datetime = tz.localize(datetime.datetime.combine(alarm_date, alarm_time))
+            
+            # If time is in the past for today, move to tomorrow
+            if alarm_datetime <= now and date_str is None:
+                alarm_date = (now + datetime.timedelta(days=1)).date()
+                alarm_datetime = tz.localize(datetime.datetime.combine(alarm_date, alarm_time))
+            
+            # Calculate seconds until alarm
+            seconds_until_alarm = (alarm_datetime - now).total_seconds()
+            
+            if seconds_until_alarm <= 0:
+                return {"success": False, "error": "L'heure de l'alarme est déjà passée"}
+            
+            # Format for display
+            if alarm_date == now.date():
+                date_display = "aujourd'hui"
+            elif alarm_date == (now + datetime.timedelta(days=1)).date():
+                date_display = "demain"
+            else:
+                date_display = alarm_date.strftime("%A %d %B")
+            
+            time_display = f"{hour:02d}:{minute:02d}"
+            
+            def alarm_thread():
+                """Background thread that waits and then announces alarm."""
+                time.sleep(seconds_until_alarm)
+                
+                # Wait if assistant is currently speaking
+                while hasattr(self, '_is_speaking') and self._is_speaking:
+                    time.sleep(0.1)
+                
+                # Use assistant's audio lock to play alarm
+                if hasattr(self, 'assistant') and hasattr(self.assistant, '_audio_lock'):
+                    with self.assistant._audio_lock:
+                        self._play_timer_alarm()
+                else:
+                    self._play_timer_alarm()
+                
+                # Announce alarm
+                if label:
+                    message = f"Rappel: {label}"
+                else:
+                    message = f"C'est l'heure! Il est {time_display}"
+                
+                # Store reference to parent assistant for speaking
+                if hasattr(self, 'assistant'):
+                    self.assistant.speak(message)
+            
+            # Start alarm in background thread
+            thread = threading.Thread(target=alarm_thread, daemon=True)
+            thread.start()
+            
+            # Build confirmation message
+            if label:
+                confirm_msg = f"Alarme définie pour {date_display} à {time_display}: {label}"
+            else:
+                confirm_msg = f"Alarme définie pour {date_display} à {time_display}"
+            
+            return {
+                "success": True,
+                "message": confirm_msg,
+                "time": time_display,
+                "date": date_display,
+                "label": label,
+                "seconds_until_alarm": int(seconds_until_alarm)
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": f"Erreur: {str(e)}"}
+    
     def search_web(self, query: str) -> Dict[str, Any]:
         """
         Search the web using Google Custom Search API.
@@ -1243,6 +1354,31 @@ TOOL_FUNCTIONS = [
                     }
                 },
                 "required": ["seconds"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_alarm",
+            "description": "Définir une alarme/rappel pour une heure précise. Utiliser pour des rappels comme 'rappelle-moi à 18h30', 'réveille-moi à 7h demain', 'alarme à 14h00'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "time_str": {
+                        "type": "string",
+                        "description": "Heure de l'alarme au format HH:MM (24h). Ex: '18:30', '07:00', '14:00'"
+                    },
+                    "date_str": {
+                        "type": "string",
+                        "description": "Date optionnelle: 'aujourd'hui', 'demain', 'après-demain', ou format YYYY-MM-DD. Par défaut aujourd'hui (ou demain si l'heure est passée)"
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Message de rappel optionnel (ex: 'aller chez le docteur', 'appeler maman', 'prendre les médicaments')"
+                    }
+                },
+                "required": ["time_str"]
             }
         }
     },

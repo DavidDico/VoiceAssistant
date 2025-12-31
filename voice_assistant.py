@@ -1247,6 +1247,8 @@ class VoiceAssistant:
                 return self.tools.calculate(**function_args)
             elif function_name == "set_timer":
                 return self.tools.set_timer(**function_args)
+            elif function_name == "set_alarm":
+                return self.tools.set_alarm(**function_args)
             elif function_name == "search_web":
                 return self.tools.search_web(**function_args)
             elif function_name == "load_webpage":
