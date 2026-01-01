@@ -238,6 +238,13 @@ class VoiceAssistant:
            - Pour Email: utilise "{first_email_contact}" comme nom de contact
            - Pour SMS: utilise "{first_sms_contact}" comme nom de contact
         
+        GESTION DE LA MÉMOIRE:
+        Tu peux sauvegarder et récupérer des informations avec save_memories et get_memories.
+        IMPORTANT: Ne supprime JAMAIS toutes les mémoires sauf si l'utilisateur demande EXPLICITEMENT de "tout effacer", 
+        "supprimer toutes les mémoires", "vider la mémoire", ou une formulation similaire très claire.
+        Quand l'utilisateur dit "oublie ça", "supprime ça", "efface cette info", supprime UNIQUEMENT l'information spécifique 
+        dont il parle, pas les autres mémoires. Garde toujours les mémoires non concernées par la demande.
+        
         GESTION DE LA CONVERSATION:
         Tu as une fonction end_conversation pour terminer la conversation.
         

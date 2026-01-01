@@ -190,16 +190,20 @@ class AssistantTools:
                 start = event['start'].get('dateTime', event['start'].get('date'))
                 end = event['end'].get('dateTime', event['end'].get('date'))
                 
-                # Parse and format times
+                # Parse and format times, converting to local timezone
                 if 'T' in start:
                     start_dt = datetime.datetime.fromisoformat(start.replace('Z', '+00:00'))
-                    start_formatted = start_dt.strftime('%H:%M')
+                    # Convert to local timezone
+                    start_dt_local = start_dt.astimezone(tz)
+                    start_formatted = start_dt_local.strftime('%H:%M')
                 else:
                     start_formatted = "Toute la journée"
                 
                 if 'T' in end:
                     end_dt = datetime.datetime.fromisoformat(end.replace('Z', '+00:00'))
-                    end_formatted = end_dt.strftime('%H:%M')
+                    # Convert to local timezone
+                    end_dt_local = end_dt.astimezone(tz)
+                    end_formatted = end_dt_local.strftime('%H:%M')
                 else:
                     end_formatted = ""
                 
