@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 import random
+import re
 from google.cloud import speech
 from openai import OpenAI
 import wave
@@ -39,6 +40,38 @@ FILLER_PHRASES = [
     "Euh...",
     "Une seconde...",
     "Je regarde...",
+]
+# =============================================================================
+
+# =============================================================================
+# QUICK GOODBYE PHRASES - Pre-cached audio for fast conversation endings
+# =============================================================================
+GOODBYE_PHRASES_WITH_THANKS = [
+    "De rien, à plus",
+    "De rien, au revoir",
+    "De rien, à la prochaine",
+]
+
+GOODBYE_PHRASES_WITHOUT_THANKS = [
+    "À plus",
+    "Au revoir",
+    "À la prochaine",
+]
+
+# Keyphrases that trigger quick goodbye (exact match after normalization)
+QUICK_END_PHRASES = [
+    "ok merci",
+    "merci",
+    "ok merci au revoir",
+    "merci au revoir",
+    "au revoir",
+    "a plus",
+    "à plus",
+    "ok merci a plus",
+    "ok merci à plus",
+    "merci a plus",
+    "merci à plus",
+    "fin de conversation",
 ]
 # =============================================================================
 
@@ -79,6 +112,35 @@ EXTENDED_TOOL_FUNCTIONS = TOOL_FUNCTIONS + [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_conversation_timeout",
+            "description": "Modifier la durée avant mise en veille automatique. Utiliser quand l'utilisateur demande de changer le timeout, la durée d'écoute, le temps avant mise en veille. Exemples: 'change la durée pendant laquelle tu écoutes', 'modifie ton timeout', 'change ta mise en veille à 60 secondes', 'mets toi en veille au bout de 2 minutes'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {
+                        "type": "integer",
+                        "description": "Durée en secondes avant mise en veille (entre 10 et 3600 secondes). Les valeurs hors limites seront ajustées automatiquement."
+                    }
+                },
+                "required": ["seconds"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_conversation_timeout",
+            "description": "Obtenir la durée actuelle avant mise en veille automatique. Utiliser quand l'utilisateur demande quelle est la durée d'écoute, le timeout actuel, combien de temps avant la mise en veille.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -87,11 +149,13 @@ NO_FILLER_FUNCTIONS = {
     "end_conversation",
     "enable_boost_mode",
     "disable_boost_mode",
+    "set_conversation_timeout",
+    "get_conversation_timeout",
 }
 
 
 class VoiceAssistant:
-    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None, email_smtp_server=None, email_smtp_port=None, email_address=None, email_password=None, email_contacts=None, silence_timeout=1.5, conversation_timeout=10.0):
+    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None, email_smtp_server=None, email_smtp_port=None, email_address=None, email_password=None, email_contacts=None, silence_timeout=1.5, conversation_timeout=10.0, max_function_calls=5):
         """
         Initialize the voice assistant.
         
@@ -126,6 +190,7 @@ class VoiceAssistant:
             email_contacts: Dictionary of contact names to email addresses (optional)
             silence_timeout: Seconds of silence before considering speech ended (default 1.5)
             conversation_timeout: Seconds of no speech before ending conversation (default 10.0)
+            max_function_calls: Maximum number of function calls per user interaction (default 5)
         """
         self.porcupine_access_key = porcupine_access_key
         self.openai_client = OpenAI(api_key=openai_api_key)
@@ -166,8 +231,10 @@ class VoiceAssistant:
         self.greetings_cache_dir = greetings_cache_dir or os.path.expanduser("~/.casimir_greetings")
         self._greeting_files = {}  # Cache of greeting text -> file path
         self._filler_files = {}    # Cache of filler phrase -> file path
+        self._goodbye_files = {}   # Cache of goodbye phrase -> file path
         self._ensure_greetings_cached()
         self._ensure_fillers_cached()
+        self._ensure_goodbyes_cached()
         
         # Set Google credentials if provided
         if google_credentials_path:
@@ -197,6 +264,9 @@ class VoiceAssistant:
         # History configuration
         self.max_history_items = max_history_items
         self.history_max_age_seconds = history_max_age_seconds
+        
+        # Function call limit
+        self.max_function_calls = max_function_calls
         
         # Conversation history with timestamps: list of {"message": {...}, "timestamp": float}
         self.conversation_history = []
@@ -258,12 +328,72 @@ class VoiceAssistant:
         
         NE PAS appeler end_conversation si l'utilisateur pose une question ou fait une demande.
         
+        LIMITE D'APPELS DE FONCTIONS:
+        Tu as une limite de {self.max_function_calls} appels de fonctions par interaction utilisateur.
+        Optimise tes appels et évite les appels redondants. Si tu approches de la limite, donne une réponse 
+        avec les informations disponibles.
+        
         Si l'utilisateur mentionne ton nom ("{wake_word_name}") pendant la conversation, c'est normal."""
         
         # Speech recognition settings
         self.silence_timeout = silence_timeout  # Seconds of silence before considering speech ended
         self.conversation_timeout = conversation_timeout  # Seconds of no speech before ending conversation
         self.last_transcript_time = None
+    
+    def _normalize_for_quick_end(self, text: str) -> str:
+        """Normalize text for quick end phrase detection: remove punctuation, lowercase."""
+        # Remove all punctuation
+        normalized = re.sub(r'[^\w\s]', '', text)
+        # Convert to lowercase and strip
+        normalized = normalized.lower().strip()
+        # Collapse multiple spaces
+        normalized = re.sub(r'\s+', ' ', normalized)
+        return normalized
+    
+    def _check_quick_end_phrase(self, command: str) -> tuple:
+        """
+        Check if the command is a quick end phrase.
+        
+        Returns:
+            (is_quick_end, contains_thanks) tuple
+        """
+        normalized = self._normalize_for_quick_end(command)
+        
+        # Normalize the phrases list for comparison
+        normalized_phrases = [self._normalize_for_quick_end(p) for p in QUICK_END_PHRASES]
+        
+        if normalized in normalized_phrases:
+            contains_thanks = "merci" in normalized
+            return True, contains_thanks
+        
+        return False, False
+    
+    def _play_quick_goodbye(self, contains_thanks: bool):
+        """Play a pre-cached quick goodbye phrase."""
+        if contains_thanks:
+            phrases = GOODBYE_PHRASES_WITH_THANKS
+            cache = {p: self._goodbye_files.get(p) for p in phrases if p in self._goodbye_files}
+        else:
+            phrases = GOODBYE_PHRASES_WITHOUT_THANKS
+            cache = {p: self._goodbye_files.get(p) for p in phrases if p in self._goodbye_files}
+        
+        available = [p for p in phrases if p in cache and cache[p]]
+        
+        if not available:
+            print("⚠️ Aucune phrase d'au revoir disponible")
+            return
+        
+        phrase = random.choice(available)
+        filepath = cache[phrase]
+        
+        print(f"👋 \"{phrase}\"")
+        
+        with self._audio_lock:
+            self._is_speaking = True
+            try:
+                self._play_audio_file(filepath)
+            finally:
+                self._is_speaking = False
     
     def _get_greeting_filename(self, greeting_text):
         """Generate a safe filename for a greeting text."""
@@ -272,6 +402,12 @@ class VoiceAssistant:
         text_hash = hashlib.md5(greeting_text.encode('utf-8')).hexdigest()[:12]
         # Also include voice name to regenerate if voice changes
         return f"greeting_{self.tts_voice}_{text_hash}.mp3"
+    
+    def _get_goodbye_filename(self, goodbye_text):
+        """Generate a safe filename for a goodbye phrase."""
+        import hashlib
+        text_hash = hashlib.md5(goodbye_text.encode('utf-8')).hexdigest()[:12]
+        return f"goodbye_{self.tts_voice}_{text_hash}.mp3"
     
     def _ensure_greetings_cached(self):
         """Ensure all greetings are cached as audio files."""
@@ -346,6 +482,41 @@ class VoiceAssistant:
         
         print(f"   {len(self._filler_files)}/{len(FILLER_PHRASES)} fillers prêts\n")
     
+    def _ensure_goodbyes_cached(self):
+        """Ensure all goodbye phrases are cached as audio files."""
+        os.makedirs(self.greetings_cache_dir, exist_ok=True)
+        
+        print("🔊 Vérification du cache des phrases d'au revoir...")
+        
+        all_goodbyes = GOODBYE_PHRASES_WITH_THANKS + GOODBYE_PHRASES_WITHOUT_THANKS
+        
+        for goodbye in all_goodbyes:
+            filename = self._get_goodbye_filename(goodbye)
+            filepath = os.path.join(self.greetings_cache_dir, filename)
+            
+            if os.path.exists(filepath):
+                self._goodbye_files[goodbye] = filepath
+                print(f"   ✓ Au revoir en cache: \"{goodbye}\"")
+            else:
+                print(f"   🎤 Génération TTS pour: \"{goodbye}\"...")
+                try:
+                    response = self.openai_client.audio.speech.create(
+                        model="tts-1",
+                        voice=self.tts_voice,
+                        input=goodbye
+                    )
+                    
+                    with open(filepath, 'wb') as f:
+                        f.write(response.content)
+                    
+                    self._goodbye_files[goodbye] = filepath
+                    print(f"   ✓ Au revoir généré et mis en cache: \"{goodbye}\"")
+                    
+                except Exception as e:
+                    print(f"   ❌ Erreur lors de la génération de \"{goodbye}\": {e}")
+        
+        print(f"   {len(self._goodbye_files)}/{len(all_goodbyes)} phrases d'au revoir prêtes\n")
+    
     def _get_filler_filename(self, filler_text):
         """Generate a safe filename for a filler phrase."""
         import hashlib
@@ -368,7 +539,6 @@ class VoiceAssistant:
             with self._audio_lock:
                 self._is_speaking = True
                 try:
-                    self._play_headset_wakeup()
                     self._play_audio_file(filepath)
                 finally:
                     self._is_speaking = False
@@ -549,9 +719,6 @@ class VoiceAssistant:
                 filepath = self._greeting_files[greeting]
                 
                 print(f"🗣️ \"{greeting}\"")
-                
-                # Wake up wireless headset
-                self._play_headset_wakeup()
                 
                 # Play the cached greeting
                 self._play_audio_file(filepath)
@@ -901,10 +1068,22 @@ class VoiceAssistant:
         
     def process_command(self, command):
         """Send command to OpenAI GPT with function calling support and speak the response."""
+        
+        # Check for quick end phrase first (before any LLM call)
+        is_quick_end, contains_thanks = self._check_quick_end_phrase(command)
+        if is_quick_end:
+            print("   → Phrase de fin rapide détectée")
+            self._play_quick_goodbye(contains_thanks)
+            self._conversation_should_end = True
+            return
+        
         print("🤖 Traitement avec GPT...")
         
         # Reset filler flag for this interaction
         self._filler_played_this_interaction = False
+        
+        # Track function calls for this interaction
+        function_call_count = 0
         
         # Check for end phrases locally as a fallback
         end_phrases = [
@@ -931,12 +1110,33 @@ class VoiceAssistant:
             })
             
             # Loop until GPT gives a final response without tool calls
-            max_iterations = 5
+            max_iterations = self.max_function_calls + 1  # +1 for final text response
             iteration = 0
             assistant_message = None
             
             while iteration < max_iterations:
                 iteration += 1
+                
+                # Safety check: enforce function call limit
+                if function_call_count >= self.max_function_calls:
+                    print(f"   ⚠️ Limite de {self.max_function_calls} appels de fonctions atteinte")
+                    # Force a text response by not providing tools
+                    messages = [{"role": "system", "content": self.system_prompt + "\n\nATTENTION: Tu as atteint la limite d'appels de fonctions. Donne une réponse avec les informations disponibles."}] + self._get_messages_for_api()
+                    
+                    model = "gpt-4o" if self._boost_mode else "gpt-4o-mini"
+                    
+                    stream = self.openai_client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=500,
+                        temperature=0.7,
+                        stream=True
+                    )
+                    
+                    result = self._process_streaming_response(stream)
+                    if result["type"] == "text":
+                        assistant_message = result["content"]
+                    break
                 
                 messages = [{"role": "system", "content": self.system_prompt}] + self._get_messages_for_api()
                 
@@ -950,7 +1150,7 @@ class VoiceAssistant:
                     messages=messages,
                     tools=EXTENDED_TOOL_FUNCTIONS,
                     tool_choice="auto",
-                    max_tokens=150,
+                    max_tokens=500,
                     temperature=0.7,
                     stream=True
                 )
@@ -966,6 +1166,9 @@ class VoiceAssistant:
                 # If it's a tool call, handle it
                 elif result["type"] == "tool_calls":
                     tool_calls = result["tool_calls"]
+                    
+                    # Count function calls
+                    function_call_count += len(tool_calls)
                     
                     # Play a filler phrase on first tool call of this interaction
                     # Only if at least one function in this batch should trigger a filler
@@ -997,7 +1200,23 @@ class VoiceAssistant:
                     # Execute each tool and add results
                     for tc in tool_calls:
                         function_name = tc["name"]
-                        function_args = json.loads(tc["arguments"])
+                        
+                        # Parse function arguments with error handling
+                        try:
+                            function_args = json.loads(tc["arguments"])
+                        except json.JSONDecodeError as e:
+                            print(f"⚠️ Erreur de parsing JSON pour {function_name}: {e}")
+                            print(f"   Arguments bruts: {tc['arguments'][:100]}...")
+                            # Add error result to conversation - tell GPT to retry with same intent
+                            error_msg = f"Erreur technique: les arguments ont été tronqués. Réessaie la même opération avec les mêmes données."
+                            if function_name == "save_memories":
+                                error_msg += " IMPORTANT: Ne supprime PAS les mémoires, réessaie de sauvegarder les mémoires que tu voulais garder."
+                            self._add_to_history({
+                                "role": "tool",
+                                "content": json.dumps({"success": False, "error": error_msg}, ensure_ascii=False),
+                                "tool_call_id": tc["id"]
+                            })
+                            continue
                         
                         print(f"🔧 Appel de fonction: {function_name}({function_args})")
                         
@@ -1014,6 +1233,10 @@ class VoiceAssistant:
                             print(f"   → Mode boost désactivé (gpt-4o-mini)")
                             self._boost_mode = False
                             function_result = {"success": True, "message": "Mode normal rétabli."}
+                        elif function_name == "set_conversation_timeout":
+                            function_result = self._set_conversation_timeout(**function_args)
+                        elif function_name == "get_conversation_timeout":
+                            function_result = self._get_conversation_timeout()
                         else:
                             # Execute other tool functions
                             function_result = self._execute_tool(function_name, function_args)
@@ -1051,6 +1274,71 @@ class VoiceAssistant:
             import traceback
             traceback.print_exc()
     
+    def _set_conversation_timeout(self, seconds: int) -> dict:
+        """
+        Set the conversation timeout duration.
+        
+        Args:
+            seconds: Desired timeout in seconds (will be clamped to 10-3600)
+            
+        Returns:
+            Dictionary with the result
+        """
+        # Clamp value to valid range
+        original_value = seconds
+        seconds = max(10, min(3600, seconds))
+        
+        self.conversation_timeout = float(seconds)
+        
+        # Format for display
+        if seconds >= 60:
+            minutes = seconds // 60
+            remaining_secs = seconds % 60
+            if remaining_secs:
+                duration_str = f"{minutes} minute{'s' if minutes > 1 else ''} et {remaining_secs} seconde{'s' if remaining_secs > 1 else ''}"
+            else:
+                duration_str = f"{minutes} minute{'s' if minutes > 1 else ''}"
+        else:
+            duration_str = f"{seconds} seconde{'s' if seconds > 1 else ''}"
+        
+        message = f"Durée de mise en veille modifiée à {duration_str}"
+        if original_value != seconds:
+            message += f" (valeur ajustée depuis {original_value})"
+        
+        print(f"   → Timeout modifié: {seconds}s")
+        
+        return {
+            "success": True,
+            "seconds": seconds,
+            "message": message
+        }
+    
+    def _get_conversation_timeout(self) -> dict:
+        """
+        Get the current conversation timeout duration.
+        
+        Returns:
+            Dictionary with the current timeout
+        """
+        seconds = int(self.conversation_timeout)
+        
+        # Format for display
+        if seconds >= 60:
+            minutes = seconds // 60
+            remaining_secs = seconds % 60
+            if remaining_secs:
+                duration_str = f"{minutes} minute{'s' if minutes > 1 else ''} et {remaining_secs} seconde{'s' if remaining_secs > 1 else ''}"
+            else:
+                duration_str = f"{minutes} minute{'s' if minutes > 1 else ''}"
+        else:
+            duration_str = f"{seconds} seconde{'s' if seconds > 1 else ''}"
+        
+        return {
+            "success": True,
+            "seconds": seconds,
+            "message": f"La durée avant mise en veille est actuellement de {duration_str}"
+        }
+    
     def execute_background_task(self, task: str, speak_result: bool = False):
         """
         Execute a scheduled task in the background.
@@ -1073,19 +1361,25 @@ class VoiceAssistant:
             ]
             
             # Loop until GPT gives a final response without tool calls
-            max_iterations = 10
+            max_iterations = self.max_function_calls + 1
             iteration = 0
+            function_call_count = 0
             final_response = None
             
             while iteration < max_iterations:
                 iteration += 1
+                
+                # Safety check for function call limit
+                if function_call_count >= self.max_function_calls:
+                    print(f"   ⚠️ [Background] Limite de fonctions atteinte")
+                    break
                 
                 response = self.openai_client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=messages,
                     tools=EXTENDED_TOOL_FUNCTIONS,
                     tool_choice="auto",
-                    max_tokens=300,
+                    max_tokens=500,
                     temperature=0.7
                 )
                 
@@ -1095,6 +1389,9 @@ class VoiceAssistant:
                 if not response_message.tool_calls:
                     final_response = response_message.content
                     break
+                
+                # Count function calls
+                function_call_count += len(response_message.tool_calls)
                 
                 # Add assistant message with tool calls to messages
                 messages.append({
@@ -1116,13 +1413,28 @@ class VoiceAssistant:
                 # Execute each tool and add results
                 for tool_call in response_message.tool_calls:
                     function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
+                    
+                    # Parse function arguments with error handling
+                    try:
+                        function_args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError as e:
+                        print(f"   ⚠️ [Background] Erreur de parsing JSON pour {function_name}: {e}")
+                        messages.append({
+                            "role": "tool",
+                            "content": json.dumps({"success": False, "error": f"Arguments JSON invalides: {str(e)}"}, ensure_ascii=False),
+                            "tool_call_id": tool_call.id
+                        })
+                        continue
                     
                     print(f"   🔧 [Background] {function_name}({function_args})")
                     
                     # Execute tool (but not conversation control functions)
                     if function_name in ["end_conversation", "enable_boost_mode", "disable_boost_mode"]:
                         function_result = {"success": True, "message": "Ignoré en mode background"}
+                    elif function_name == "set_conversation_timeout":
+                        function_result = self._set_conversation_timeout(**function_args)
+                    elif function_name == "get_conversation_timeout":
+                        function_result = self._get_conversation_timeout()
                     else:
                         function_result = self._execute_tool(function_name, function_args)
                     
@@ -1211,12 +1523,10 @@ class VoiceAssistant:
                             if audio_path is None:  # Poison pill
                                 break
                             
-                            # Wake up headset before first sentence
-                            if first_sentence:
-                                self._play_headset_wakeup()
-                                first_sentence = False
-                            else:
-                                time.sleep(0.1)  # Small pause between sentences
+                            # Small pause between sentences (except before first)
+                            if not first_sentence:
+                                time.sleep(0.1)
+                            first_sentence = False
                             
                             self._play_audio_file(audio_path)
                             
@@ -1440,9 +1750,6 @@ class VoiceAssistant:
             self._is_speaking = True
             
             try:
-                # Wake up wireless headset
-                self._play_headset_wakeup()
-                
                 # Queue to hold generated audio files ready to play
                 audio_queue = queue.Queue()
                 generation_complete = threading.Event()
@@ -1510,9 +1817,6 @@ class VoiceAssistant:
             self._is_speaking = True
             
             try:
-                # Wake up wireless headset
-                self._play_headset_wakeup()
-                
                 # Generate speech using OpenAI TTS
                 response = self.openai_client.audio.speech.create(
                     model="tts-1",
@@ -1540,34 +1844,6 @@ class VoiceAssistant:
             finally:
                 self._is_speaking = False
             
-    def _play_headset_wakeup(self):
-        """Play a very brief, nearly silent tone to wake up wireless headsets."""
-        try:
-            import pygame
-            
-            pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
-            
-            sample_rate = 22050
-            duration = 0.05
-            frequency = 440
-            
-            samples = int(sample_rate * duration)
-            wave_data = np.sin(2 * np.pi * frequency * np.linspace(0, duration, samples))
-            wave_data = wave_data * 0.01
-            wave_data = (wave_data * 32767).astype(np.int16)
-            stereo_data = np.column_stack((wave_data, wave_data))
-            
-            sound = pygame.sndarray.make_sound(stereo_data)
-            sound.play()
-            
-            while pygame.mixer.get_busy():
-                pygame.time.wait(10)
-            
-            pygame.mixer.quit()
-            
-        except Exception:
-            pass
-    
     def _play_audio_file(self, file_path):
         """Play an audio file using pygame."""
         try:
@@ -1596,7 +1872,9 @@ class VoiceAssistant:
         print("\n📋 Mode de fonctionnement:")
         print(f"   • Dites '{self.wake_word}' pour démarrer une conversation")
         print("   • La conversation continue jusqu'à sa fin naturelle")
-        print("   • Dites 'merci', 'au revoir', etc. pour terminer\n")
+        print("   • Dites 'merci', 'au revoir', etc. pour terminer")
+        print(f"   • Timeout de conversation: {self.conversation_timeout}s")
+        print(f"   • Limite d'appels de fonctions: {self.max_function_calls}\n")
         
         try:
             self.initialize_porcupine()
@@ -1711,6 +1989,11 @@ if __name__ == "__main__":
     except ImportError:
         CONVERSATION_TIMEOUT = 10.0  # Default: 10 seconds of no speech before ending conversation
     
+    try:
+        from config import MAX_FUNCTION_CALLS
+    except ImportError:
+        MAX_FUNCTION_CALLS = 5  # Default: 5 function calls per interaction
+    
     # Create and run the assistant
     assistant = VoiceAssistant(
         porcupine_access_key=PORCUPINE_ACCESS_KEY,
@@ -1742,7 +2025,8 @@ if __name__ == "__main__":
         email_password=EMAIL_PASSWORD,
         email_contacts=EMAIL_CONTACTS,
         silence_timeout=SILENCE_TIMEOUT,
-        conversation_timeout=CONVERSATION_TIMEOUT
+        conversation_timeout=CONVERSATION_TIMEOUT,
+        max_function_calls=MAX_FUNCTION_CALLS
     )
     
     assistant.run()
