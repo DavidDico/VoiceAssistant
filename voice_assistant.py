@@ -7,6 +7,7 @@ import threading
 import time
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.cloud import speech
 from openai import OpenAI
 import wave
@@ -1123,14 +1124,17 @@ class VoiceAssistant:
                     # Force a text response by not providing tools
                     messages = [{"role": "system", "content": self.system_prompt + "\n\nATTENTION: Tu as atteint la limite d'appels de fonctions. Donne une réponse avec les informations disponibles."}] + self._get_messages_for_api()
                     
-                    model = "gpt-4o" if self._boost_mode else "gpt-4o-mini"
+                    # Select model and service tier based on boost mode
+                    model = "gpt-5.1" if self._boost_mode else "gpt-4o-mini"
+                    service_tier = "default" if self._boost_mode else "priority"
                     
                     stream = self.openai_client.chat.completions.create(
                         model=model,
                         messages=messages,
-                        max_tokens=500,
+                        **({"max_completion_tokens": 500} if self._boost_mode else {"max_tokens": 500}),
                         temperature=0.7,
-                        stream=True
+                        stream=True,
+                        service_tier=service_tier
                     )
                     
                     result = self._process_streaming_response(stream)
@@ -1140,8 +1144,9 @@ class VoiceAssistant:
                 
                 messages = [{"role": "system", "content": self.system_prompt}] + self._get_messages_for_api()
                 
-                # Select model based on boost mode
-                model = "gpt-4o" if self._boost_mode else "gpt-4o-mini"
+                # Select model and service tier based on boost mode
+                model = "gpt-5.1" if self._boost_mode else "gpt-4o-mini"
+                service_tier = "default" if self._boost_mode else "priority"
                 
                 # First, try streaming response
                 # We need to detect if it's a tool call or text response
@@ -1150,9 +1155,10 @@ class VoiceAssistant:
                     messages=messages,
                     tools=EXTENDED_TOOL_FUNCTIONS,
                     tool_choice="auto",
-                    max_tokens=500,
+                    **({"max_completion_tokens": 500} if self._boost_mode else {"max_tokens": 500}),
                     temperature=0.7,
-                    stream=True
+                    stream=True,
+                    service_tier=service_tier
                 )
                 
                 # Process the stream
@@ -1197,13 +1203,24 @@ class VoiceAssistant:
                         "tool_calls": tool_calls_for_history
                     })
                     
-                    # Execute each tool and add results
+                    # Execute each tool and add results (in parallel for external tools)
+                    # First, parse all arguments and separate sync vs async tools
+                    parsed_tools = []
+                    sync_tool_names = {"end_conversation", "enable_boost_mode", "disable_boost_mode", 
+                                       "set_conversation_timeout", "get_conversation_timeout"}
+                    
                     for tc in tool_calls:
                         function_name = tc["name"]
                         
                         # Parse function arguments with error handling
                         try:
                             function_args = json.loads(tc["arguments"])
+                            parsed_tools.append({
+                                "id": tc["id"],
+                                "name": function_name,
+                                "args": function_args,
+                                "is_sync": function_name in sync_tool_names
+                            })
                         except json.JSONDecodeError as e:
                             print(f"⚠️ Erreur de parsing JSON pour {function_name}: {e}")
                             print(f"   Arguments bruts: {tc['arguments'][:100]}...")
@@ -1216,41 +1233,56 @@ class VoiceAssistant:
                                 "content": json.dumps({"success": False, "error": error_msg}, ensure_ascii=False),
                                 "tool_call_id": tc["id"]
                             })
-                            continue
-                        
-                        print(f"🔧 Appel de fonction: {function_name}({function_args})")
-                        
-                        # Handle end_conversation function
-                        if function_name == "end_conversation":
-                            print(f"   → Fin de conversation demandée")
-                            self._conversation_should_end = True
-                            function_result = {"success": True, "message": "Conversation terminée"}
-                        elif function_name == "enable_boost_mode":
-                            print(f"   → Mode boost activé (gpt-4o)")
-                            self._boost_mode = True
-                            function_result = {"success": True, "message": "Mode intelligence augmentée activé. J'utilise maintenant un modèle plus performant."}
-                        elif function_name == "disable_boost_mode":
-                            print(f"   → Mode boost désactivé (gpt-4o-mini)")
-                            self._boost_mode = False
-                            function_result = {"success": True, "message": "Mode normal rétabli."}
-                        elif function_name == "set_conversation_timeout":
-                            function_result = self._set_conversation_timeout(**function_args)
-                        elif function_name == "get_conversation_timeout":
-                            function_result = self._get_conversation_timeout()
-                        else:
-                            # Execute other tool functions
-                            function_result = self._execute_tool(function_name, function_args)
-                        
-                        # Add tool result to conversation
-                        self._add_to_history({
-                            "role": "tool",
-                            "content": json.dumps(function_result, ensure_ascii=False),
-                            "tool_call_id": tc["id"]
-                        })
                     
-                    # Wait for filler to finish before continuing to next iteration
-                    if filler_thread and filler_thread.is_alive():
-                        filler_thread.join()
+                    # Execute sync tools first (they modify state)
+                    sync_results = {}
+                    for tool in parsed_tools:
+                        if tool["is_sync"]:
+                            function_name = tool["name"]
+                            function_args = tool["args"]
+                            print(f"🔧 Appel de fonction: {function_name}({function_args})")
+                            
+                            if function_name == "end_conversation":
+                                print(f"   → Fin de conversation demandée")
+                                self._conversation_should_end = True
+                                sync_results[tool["id"]] = {"success": True, "message": "Conversation terminée"}
+                            elif function_name == "enable_boost_mode":
+                                print(f"   → Mode boost activé (gpt-5.1)")
+                                self._boost_mode = True
+                                sync_results[tool["id"]] = {"success": True, "message": "Mode intelligence augmentée activé. J'utilise maintenant GPT-5.1, un modèle plus performant."}
+                            elif function_name == "disable_boost_mode":
+                                print(f"   → Mode boost désactivé (gpt-4o-mini)")
+                                self._boost_mode = False
+                                sync_results[tool["id"]] = {"success": True, "message": "Mode normal rétabli. J'utilise maintenant GPT-4o-mini."}
+                            elif function_name == "set_conversation_timeout":
+                                sync_results[tool["id"]] = self._set_conversation_timeout(**function_args)
+                            elif function_name == "get_conversation_timeout":
+                                sync_results[tool["id"]] = self._get_conversation_timeout()
+                    
+                    # Execute async tools in parallel
+                    async_tools = [t for t in parsed_tools if not t["is_sync"]]
+                    async_results = {}
+                    
+                    if async_tools:
+                        def execute_tool_wrapper(tool):
+                            print(f"🔧 Appel de fonction: {tool['name']}({tool['args']})")
+                            return tool["id"], self._execute_tool(tool["name"], tool["args"])
+                        
+                        with ThreadPoolExecutor(max_workers=min(len(async_tools), 5)) as executor:
+                            futures = {executor.submit(execute_tool_wrapper, tool): tool for tool in async_tools}
+                            for future in as_completed(futures):
+                                tool_id, result = future.result()
+                                async_results[tool_id] = result
+                    
+                    # Add all results to history in original order
+                    all_results = {**sync_results, **async_results}
+                    for tool in parsed_tools:
+                        if tool["id"] in all_results:
+                            self._add_to_history({
+                                "role": "tool",
+                                "content": json.dumps(all_results[tool["id"]], ensure_ascii=False),
+                                "tool_call_id": tool["id"]
+                            })
             
             # Add assistant response to history
             if assistant_message:
@@ -1380,7 +1412,8 @@ class VoiceAssistant:
                     tools=EXTENDED_TOOL_FUNCTIONS,
                     tool_choice="auto",
                     max_tokens=500,
-                    temperature=0.7
+                    temperature=0.7,
+                    service_tier="priority"
                 )
                 
                 response_message = response.choices[0].message
@@ -1410,13 +1443,21 @@ class VoiceAssistant:
                     ]
                 })
                 
-                # Execute each tool and add results
+                # Parse all tool calls first
+                parsed_tools = []
+                ignored_functions = {"end_conversation", "enable_boost_mode", "disable_boost_mode"}
+                
                 for tool_call in response_message.tool_calls:
                     function_name = tool_call.function.name
                     
-                    # Parse function arguments with error handling
                     try:
                         function_args = json.loads(tool_call.function.arguments)
+                        parsed_tools.append({
+                            "id": tool_call.id,
+                            "name": function_name,
+                            "args": function_args,
+                            "ignored": function_name in ignored_functions
+                        })
                     except json.JSONDecodeError as e:
                         print(f"   ⚠️ [Background] Erreur de parsing JSON pour {function_name}: {e}")
                         messages.append({
@@ -1424,26 +1465,41 @@ class VoiceAssistant:
                             "content": json.dumps({"success": False, "error": f"Arguments JSON invalides: {str(e)}"}, ensure_ascii=False),
                             "tool_call_id": tool_call.id
                         })
-                        continue
+                
+                # Execute tools in parallel (except ignored ones)
+                results = {}
+                
+                # Handle ignored and special functions first
+                for tool in parsed_tools:
+                    if tool["ignored"]:
+                        results[tool["id"]] = {"success": True, "message": "Ignoré en mode background"}
+                    elif tool["name"] == "set_conversation_timeout":
+                        results[tool["id"]] = self._set_conversation_timeout(**tool["args"])
+                    elif tool["name"] == "get_conversation_timeout":
+                        results[tool["id"]] = self._get_conversation_timeout()
+                
+                # Execute remaining tools in parallel
+                external_tools = [t for t in parsed_tools if t["id"] not in results]
+                
+                if external_tools:
+                    def execute_tool_wrapper(tool):
+                        print(f"   🔧 [Background] {tool['name']}({tool['args']})")
+                        return tool["id"], self._execute_tool(tool["name"], tool["args"])
                     
-                    print(f"   🔧 [Background] {function_name}({function_args})")
-                    
-                    # Execute tool (but not conversation control functions)
-                    if function_name in ["end_conversation", "enable_boost_mode", "disable_boost_mode"]:
-                        function_result = {"success": True, "message": "Ignoré en mode background"}
-                    elif function_name == "set_conversation_timeout":
-                        function_result = self._set_conversation_timeout(**function_args)
-                    elif function_name == "get_conversation_timeout":
-                        function_result = self._get_conversation_timeout()
-                    else:
-                        function_result = self._execute_tool(function_name, function_args)
-                    
-                    # Add tool result to messages
-                    messages.append({
-                        "role": "tool",
-                        "content": json.dumps(function_result, ensure_ascii=False),
-                        "tool_call_id": tool_call.id
-                    })
+                    with ThreadPoolExecutor(max_workers=min(len(external_tools), 5)) as executor:
+                        futures = {executor.submit(execute_tool_wrapper, tool): tool for tool in external_tools}
+                        for future in as_completed(futures):
+                            tool_id, result = future.result()
+                            results[tool_id] = result
+                
+                # Add results to messages in original order
+                for tool in parsed_tools:
+                    if tool["id"] in results:
+                        messages.append({
+                            "role": "tool",
+                            "content": json.dumps(results[tool["id"]], ensure_ascii=False),
+                            "tool_call_id": tool["id"]
+                        })
             
             if final_response:
                 print(f"   ✅ [Background] Résultat: {final_response}")
