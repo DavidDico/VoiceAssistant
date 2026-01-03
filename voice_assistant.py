@@ -156,7 +156,7 @@ NO_FILLER_FUNCTIONS = {
 
 
 class VoiceAssistant:
-    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None, email_smtp_server=None, email_smtp_port=None, email_address=None, email_password=None, email_contacts=None, silence_timeout=1.5, conversation_timeout=10.0, max_function_calls=5):
+    def __init__(self, porcupine_access_key, openai_api_key, google_credentials_path=None, openweather_api_key=None, tts_voice="alloy", wake_word="porcupine", custom_wake_word_path=None, porcupine_model_path=None, google_search_api_key=None, google_search_engine_id=None, twilio_account_sid=None, twilio_auth_token=None, twilio_sms_from=None, sms_contacts=None, rss_feeds=None, beep_volume=0.3, google_calendar_credentials_path=None, google_calendar_id=None, greetings_cache_dir=None, max_history_items=50, history_max_age_seconds=3600, memory_file_path=None, default_city=None, email_smtp_server=None, email_smtp_port=None, email_address=None, email_password=None, email_contacts=None, silence_timeout=1.5, conversation_timeout=10.0, max_function_calls=5, max_completion_tokens=500):
         """
         Initialize the voice assistant.
         
@@ -192,6 +192,7 @@ class VoiceAssistant:
             silence_timeout: Seconds of silence before considering speech ended (default 1.5)
             conversation_timeout: Seconds of no speech before ending conversation (default 10.0)
             max_function_calls: Maximum number of function calls per user interaction (default 5)
+            max_completion_tokens: Maximum tokens for GPT completions (default 500)
         """
         self.porcupine_access_key = porcupine_access_key
         self.openai_client = OpenAI(api_key=openai_api_key)
@@ -268,6 +269,9 @@ class VoiceAssistant:
         
         # Function call limit
         self.max_function_calls = max_function_calls
+        
+        # Max tokens for GPT completions
+        self.max_completion_tokens = max_completion_tokens
         
         # Conversation history with timestamps: list of {"message": {...}, "timestamp": float}
         self.conversation_history = []
@@ -1131,7 +1135,7 @@ class VoiceAssistant:
                     stream = self.openai_client.chat.completions.create(
                         model=model,
                         messages=messages,
-                        **({"max_completion_tokens": 500} if self._boost_mode else {"max_tokens": 500}),
+                        max_tokens=self.max_completion_tokens,
                         temperature=0.7,
                         stream=True,
                         service_tier=service_tier
@@ -1148,6 +1152,12 @@ class VoiceAssistant:
                 model = "gpt-5.1" if self._boost_mode else "gpt-4o-mini"
                 service_tier = "default" if self._boost_mode else "priority"
                 
+                # Build token parameter based on model (GPT-5.1 uses max_completion_tokens)
+                if self._boost_mode:
+                    token_param = {"max_completion_tokens": self.max_completion_tokens}
+                else:
+                    token_param = {"max_tokens": self.max_completion_tokens}
+                
                 # First, try streaming response
                 # We need to detect if it's a tool call or text response
                 stream = self.openai_client.chat.completions.create(
@@ -1155,10 +1165,10 @@ class VoiceAssistant:
                     messages=messages,
                     tools=EXTENDED_TOOL_FUNCTIONS,
                     tool_choice="auto",
-                    **({"max_completion_tokens": 500} if self._boost_mode else {"max_tokens": 500}),
                     temperature=0.7,
                     stream=True,
-                    service_tier=service_tier
+                    service_tier=service_tier,
+                    **token_param
                 )
                 
                 # Process the stream
@@ -1411,7 +1421,7 @@ class VoiceAssistant:
                     messages=messages,
                     tools=EXTENDED_TOOL_FUNCTIONS,
                     tool_choice="auto",
-                    max_tokens=500,
+                    max_tokens=self.max_completion_tokens,
                     temperature=0.7,
                     service_tier="priority"
                 )
@@ -2050,6 +2060,11 @@ if __name__ == "__main__":
     except ImportError:
         MAX_FUNCTION_CALLS = 5  # Default: 5 function calls per interaction
     
+    try:
+        from config import MAX_COMPLETION_TOKENS
+    except ImportError:
+        MAX_COMPLETION_TOKENS = 500  # Default: 500 tokens for GPT completions
+    
     # Create and run the assistant
     assistant = VoiceAssistant(
         porcupine_access_key=PORCUPINE_ACCESS_KEY,
@@ -2082,7 +2097,8 @@ if __name__ == "__main__":
         email_contacts=EMAIL_CONTACTS,
         silence_timeout=SILENCE_TIMEOUT,
         conversation_timeout=CONVERSATION_TIMEOUT,
-        max_function_calls=MAX_FUNCTION_CALLS
+        max_function_calls=MAX_FUNCTION_CALLS,
+        max_completion_tokens=MAX_COMPLETION_TOKENS
     )
     
     assistant.run()
